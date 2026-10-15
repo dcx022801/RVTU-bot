@@ -1,0 +1,10 @@
+{
+  "_说明": [
+    "latitude：纬度（MAC 通道全部失败时，回退定位通道使用）",
+    "longitude：经度",
+    "locationInfo：打卡点地点描述（服务端展示用）"
+  ],
+  "latitude": "<纬度，如 35.123456>",
+  "longitude": "<经度，如 119.123456>",
+  "locationInfo": "<打卡点地点描述>"
+}
