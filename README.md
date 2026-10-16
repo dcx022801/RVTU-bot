@@ -5,13 +5,13 @@
 
 | 任务 | 触发时间 | 说明 |
 |---|---|---|
-| 宿舍考勤打卡 | 每天 21:00（随机延迟 0~59s） | 失败自动重试；打卡前 15 分钟邮件提醒 |
-| 乐享晚自习打卡 | 每天 19:00（随机延迟 0~59s） | MAC 通道优先，失败自动回退定位通道 |
+| 宿舍考勤打卡 | 每天 21:00（随机延迟 0~59s） | 失败自动重试；打卡前 15 分钟预检（按状态选择性提醒） |
+| 乐享晚自习打卡 | 每天 19:00（随机延迟 0~59s） | MAC 通道优先，失败自动回退定位通道；打卡前 15 分钟预检 |
 | 校园网 Portal 认证 | 每 1 分钟 | 掉线后自动重新认证（使用指定的两个 MAC） |
 
 ## 特性
 
-- **打卡前提醒**：每次打卡前 15 分钟发送邮件通知，可及时决定是否阻止本次打卡（关闭容器即可）
+- **打卡前预检**：每次打卡前 15 分钟自动查询今日状态，仅在"待打卡"（发提醒，可关闭容器阻止）与"预检失败"（提示人工留意）时发送邮件；已打卡/非上课日静默
 - **凭据自愈**：token 过期后自动用身份证号重新登录并更新凭据，可长期无人值守
 - **失败重试**：打卡失败 20 分钟后自动重试一次
 - **结果邮件**：每次执行结果发送到配置的邮箱
@@ -68,8 +68,10 @@ docker exec rvtu-bot python3 /app/scripts/refresh_creds.py --check
 # 手动跑一次校园网认证
 docker exec rvtu-bot sh /app/scripts/portal-auth.sh
 
-# 测试打卡前提醒（只打印，不发信）
-docker exec rvtu-bot python3 /app/scripts/notify.py --dry-run "测试提醒" "测试内容"
+# 测试打卡前预检（只查询状态并打印，不发信）
+docker exec rvtu-bot python3 /app/scripts/notify.py --dry-run "测试提醒" "测试内容"   # 通用发信工具
+docker exec rvtu-bot python3 /app/scripts/happy_checkin.py --precheck --dry-run
+docker exec rvtu-bot python3 /app/scripts/checkin.py --precheck --dry-run
 ```
 
 ## 免责声明

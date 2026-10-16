@@ -19,11 +19,16 @@
     python3 happy_checkin.py --dry-run  # 只查询状态，不打卡、不发邮件
     python3 happy_checkin.py --force    # 忽略已打卡状态，强制再打一次
     python3 happy_checkin.py --no-mail  # 不发邮件（只打终端 + 写日志）
+    python3 happy_checkin.py --precheck # 打卡前预检（调度器在打卡前 15 分钟调用）
 
 退出码: 0 成功或已打卡 / 2 凭据或配置异常 / 3 打卡未成功 / 6 今日非上课日（静默）
 
 通知策略（只留邮件）:
-    结果邮件发往 mail.json；非上课日(rc=6) 与 --dry-run 静默不发。
+    打卡结果邮件发往 mail.json；非上课日(rc=6) 与 --dry-run 静默不发。
+    --precheck 预检模式：查询今日状态后，仅以下两种情况发邮件——
+        待打卡 → 发"将在 19:00 自动打卡"提醒（含阻止方法）；
+        预检失败（凭据/接口/配置异常）→ 发"预检失败"提醒（打卡仍会按计划尝试）；
+    已打卡、非上课日 → 静默不发。
 
 打卡协议:
     GET  /mobile/apattendance/checkin-record/v1/detail        今日状态
@@ -48,6 +53,7 @@ MACSCFG = os.path.join(CONFIG_DIR, 'macs.json')
 LOCCFG = os.path.join(CONFIG_DIR, 'location.json')
 MAILCFG = os.path.join(CONFIG_DIR, 'mail.json')
 APICFG = os.path.join(DEFAULTS_DIR, 'api.json')
+SCHEDCFG = os.path.join(DEFAULTS_DIR, 'schedule.json')
 SESSION = os.path.join(STATE_DIR, 'session.json')
 LOGDIR = os.path.join(STATE_DIR, 'logs')
 LOG = os.path.join(LOGDIR, 'happy_checkin.log')
@@ -205,6 +211,7 @@ def main() -> int:
     dry = '--dry-run' in sys.argv
     force = '--force' in sys.argv
     no_mail = '--no-mail' in sys.argv
+    pre = '--precheck' in sys.argv
 
     def notify(subject: str, body: str) -> None:
         """统一发信入口：--dry-run / --no-mail 一律不发。"""
@@ -214,6 +221,21 @@ def main() -> int:
 
     def stamp() -> str:
         return f'时间：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}'
+
+    # 打卡时间（用于预检提醒文案），取自 defaults/schedule.json 的 happy 段
+    try:
+        _h = (load_json(SCHEDCFG) or {}).get('happy') or {}
+        hhmm = f"{int(_h.get('hour', 19)):02d}:{int(_h.get('minute', 0)):02d}"
+    except Exception:
+        hhmm = '19:00'
+
+    def fail_mail(what: str, detail: str) -> None:
+        """失败提醒：预检模式提示打卡仍会尝试；正式模式按打卡失败汇报。"""
+        if pre:
+            notify(f'【日职晚自习】预检失败（{what}）',
+                   f'{detail}\n今天 {hhmm} 仍会按计划尝试打卡（如需阻止请关闭容器）。\n{stamp()}')
+        else:
+            notify(f'【日职晚自习】打卡失败（{what}）', f'{detail}\n{stamp()}')
 
     global BASE, UA, MODULE
     api_cfg = load_json(APICFG) or {}
@@ -227,16 +249,14 @@ def main() -> int:
     creds = load_json(CREDS)
     if not creds:
         log('FAIL creds.json 读取失败')
-        notify('【日职晚自习】打卡失败（凭据文件异常）',
-               f'creds.json 读取失败，无法登录打卡系统。\n{stamp()}')
+        fail_mail('凭据文件异常', 'creds.json 读取失败，无法登录打卡系统。')
         return 2
 
     macs_cfg = load_json(MACSCFG) or {}
     mac_list = [str(m).strip() for m in (macs_cfg.get('macs') or []) if str(m).strip()]
     if not mac_list:
         log('FAIL macs.json 缺失或 macs 列表为空')
-        notify('【日职晚自习】打卡失败（MAC 池未配置）',
-               f'macs.json 缺失或 macs 列表为空，无法执行 MAC 通道打卡。\n{stamp()}')
+        fail_mail('MAC 池未配置', 'macs.json 缺失或 macs 列表为空，无法执行 MAC 通道打卡。')
         return 2
 
     loc = load_json(LOCCFG) or {}
@@ -245,8 +265,7 @@ def main() -> int:
     loc_info = str(loc.get('locationInfo') or '').strip()
     if not (lat and lon):
         log('FAIL location.json 缺失或坐标为空')
-        notify('【日职晚自习】打卡失败（坐标未配置）',
-               f'location.json 缺失或坐标为空，无法执行定位通道打卡。\n{stamp()}')
+        fail_mail('坐标未配置', 'location.json 缺失或坐标为空，无法执行定位通道打卡。')
         return 2
 
     def mac_body(mac: str) -> dict:
@@ -266,14 +285,12 @@ def main() -> int:
             token = relogin(creds, sess)
         except Exception as e:
             log(f'FAIL {e}')
-            notify('【日职晚自习】打卡失败（登录失效）',
-                   f'无法登录晚自习打卡系统：{e}\n{stamp()}')
+            fail_mail('登录失效', f'无法登录晚自习打卡系统：{e}')
             return 2
         token, r, err = fetch_detail(token)
         if err:
             log(f'FAIL 重登后 detail 仍失败 {err}')
-            notify('【日职晚自习】打卡失败（接口异常）',
-                   f'重登后 detail 接口仍异常：{err}\n{stamp()}')
+            fail_mail('接口异常', f'重登后 detail 接口仍异常：{err}')
             return 2
 
     info = (f"姓名={r.get('studentName')}｜今日打卡={r.get('checkInTime') or '无'}｜"
@@ -281,6 +298,20 @@ def main() -> int:
             f"上课日={r.get('workDayToday')}｜可打卡={r.get('canCheckIn')}｜"
             f"打卡点={r.get('venueName')}｜窗口 {r.get('normalCheckinStart')}-{r.get('normalCheckinEnd')}-{r.get('lateCheckinDeadline')}")
     log(f'状态: {info}')
+
+    if pre:
+        # ---- 预检模式：仅“待打卡”发提醒；“已打卡/非上课日”静默 ----
+        if not r.get('workDayToday'):
+            log(f"PRECHECK 今日非晚自习上课日（workDays={r.get('workDays')}），静默不发邮件")
+            return 6
+        if r.get('checkInTime'):
+            log(f"PRECHECK 今日已打卡（{r['checkInTime']}），静默不发邮件")
+            return 0
+        log(f'PRECHECK 今日待打卡，发送打卡前提醒（{hhmm}）')
+        notify(f'【日职晚自习】将在 {hhmm} 自动打卡（预检：未打卡）',
+               f'预检结果：今日需打卡且尚未打卡，{hhmm} 将自动执行。\n'
+               f'如需阻止本次打卡，请在此之前关闭容器（docker compose stop / docker stop）。\n\n{info}\n{stamp()}')
+        return 0
 
     if not r.get('workDayToday'):
         # 非上课日：完全静默（不发邮件，对齐原微信汇报的 rc=6 静默逻辑）

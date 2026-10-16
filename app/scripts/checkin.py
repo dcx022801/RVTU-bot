@@ -19,8 +19,16 @@
     python3 checkin.py --dry-run  # 只查询状态，不打卡、不发邮件
     python3 checkin.py --force    # 忽略已打卡状态，强制再打一次
     python3 checkin.py --no-mail  # 不发邮件（只打终端 + 写日志）
+    python3 checkin.py --precheck # 打卡前预检（调度器在打卡前 15 分钟调用）
 
 退出码: 0 成功或已打卡 / 2 凭据或接口异常 / 3 打卡未成功
+
+通知策略（只留邮件）:
+    打卡结果邮件发往 mail.json；--dry-run 静默不发。
+    --precheck 预检模式：查询今日状态后，仅以下两种情况发邮件——
+        待打卡 → 发"将在 21:00 自动打卡"提醒（含阻止方法）；
+        预检失败（凭据/接口异常）→ 发"预检失败"提醒（打卡仍会按计划尝试）；
+    已打卡 → 静默不发。
 """
 import json, os, sys, smtplib, ssl, urllib.request, urllib.error, datetime
 from email.message import EmailMessage
@@ -33,6 +41,7 @@ SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDS = os.path.join(CONFIG_DIR, 'creds.json')
 MAILCFG = os.path.join(CONFIG_DIR, 'mail.json')
 APICFG = os.path.join(DEFAULTS_DIR, 'api.json')
+SCHEDCFG = os.path.join(DEFAULTS_DIR, 'schedule.json')
 SESSION = os.path.join(STATE_DIR, 'session.json')
 LOGDIR = os.path.join(STATE_DIR, 'logs')
 LOG = os.path.join(LOGDIR, 'checkin.log')
@@ -161,6 +170,31 @@ def main() -> int:
     dry = '--dry-run' in sys.argv
     force = '--force' in sys.argv
     no_mail = '--no-mail' in sys.argv
+    pre = '--precheck' in sys.argv
+
+    def notify(subject: str, body: str) -> None:
+        """统一发信入口：--dry-run / --no-mail 一律不发。"""
+        if dry or no_mail:
+            return
+        send_mail(subject, body)
+
+    def nowstr() -> str:
+        return f"时间：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}"
+
+    # 打卡时间（用于预检提醒文案），取自 defaults/schedule.json 的 checkin 段
+    try:
+        _c = (load_json(SCHEDCFG) or {}).get('checkin') or {}
+        hhmm = f"{int(_c.get('hour', 21)):02d}:{int(_c.get('minute', 0)):02d}"
+    except Exception:
+        hhmm = '21:00'
+
+    def fail_mail(what: str, detail: str) -> None:
+        """失败提醒：预检模式提示打卡仍会尝试；正式模式按打卡失败汇报。"""
+        if pre:
+            notify(f'【日职考勤】预检失败（{what}）',
+                   f'{detail}\n今天 {hhmm} 仍会按计划尝试打卡（如需阻止请关闭容器）。\n{nowstr()}')
+        else:
+            notify(f'【日职考勤】打卡失败（{what}）', f'{detail}\n{nowstr()}')
 
     global BASE, UA, MODULE
     api_cfg = load_json(APICFG) or {}
@@ -174,6 +208,9 @@ def main() -> int:
     creds = load_json(CREDS)
     if not creds:
         log('FAIL creds.json 读取失败')
+        if pre:
+            notify('【日职考勤】预检失败（凭据文件异常）',
+                   f'creds.json 读取失败，无法登录打卡系统。\n今天 {hhmm} 仍会按计划尝试打卡。\n{nowstr()}')
         return 2
     sess = load_json(SESSION) or {}
     token = sess.get('token') or ''
@@ -185,14 +222,12 @@ def main() -> int:
             token = relogin(creds, sess)
         except Exception as e:
             log(f'FAIL {e}')
-            if not no_mail:
-                send_mail('【日职考勤】打卡失败（登录失效）', f'无法登录打卡系统：{e}\n时间：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}')
+            fail_mail('登录失效', f'无法登录打卡系统：{e}')
             return 2
         st, res = api('GET', '/mobile/attendance/records/v1/detail', token=token)
         if not (isinstance(res, dict) and res.get('success')):
             log(f'FAIL 重登后 detail 仍失败 http={st} resp={str(res)[:200]}')
-            if not no_mail:
-                send_mail('【日职考勤】打卡失败（接口异常）', f'detail 接口返回异常：http={st}\n{str(res)[:300]}')
+            fail_mail('接口异常', f'detail 接口返回异常：http={st}\n{str(res)[:300]}')
             return 2
 
     r = res.get('result')
@@ -216,12 +251,21 @@ def main() -> int:
         info = '今日暂无打卡记录（detail.result 为空）'
     log(f'状态: {info}')
 
+    if pre:
+        # ---- 预检模式：仅“待打卡”发提醒；“已打卡”静默 ----
+        if r.get('checkInTime'):
+            log(f"PRECHECK 今日已打卡（{r['checkInTime']}），静默不发邮件")
+            return 0
+        log(f'PRECHECK 今日待打卡，发送打卡前提醒（{hhmm}）')
+        notify(f'【日职考勤】将在 {hhmm} 自动打卡（预检：未打卡）',
+               f'预检结果：今日尚未打卡，{hhmm} 将自动执行。\n'
+               f'如需阻止本次打卡，请在此之前关闭容器（docker compose stop / docker stop）。\n\n{info}\n{nowstr()}')
+        return 0
+
     if r.get('checkInTime') and not force:
         log(f"SKIP 今日已打卡（{r['checkInTime']}），不重复提交")
-        if dry or no_mail:
-            return 0
-        send_mail('【日职考勤】今日已打卡（跳过）',
-                  f"结论：无需打卡，系统已有记录（{r['checkInTime']}）。\n\n{info}\n\n时间：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
+        notify('【日职考勤】今日已打卡（跳过）',
+               f"结论：无需打卡，系统已有记录（{r['checkInTime']}）。\n\n{info}\n\n{nowstr()}")
         return 0
 
     now = datetime.datetime.now()
@@ -257,17 +301,15 @@ def main() -> int:
             else:
                 verify = '复核：接口未返回记录（result 为空）'
             log(verify)
-        if not no_mail:
-            send_mail(f"【日职考勤】打卡成功 {body['checkInTime']}",
-                      f"结论：打卡成功。\n\n提交：日期={body['checkInDate']} 时间={body['checkInTime']} 方式=手机签到\n"
-                      f"服务器返回：{res2.get('message')}\n{verify}\n\n{info}\n\n时间：{now:%Y-%m-%d %H:%M:%S}")
+        notify(f"【日职考勤】打卡成功 {body['checkInTime']}",
+               f"结论：打卡成功。\n\n提交：日期={body['checkInDate']} 时间={body['checkInTime']} 方式=手机签到\n"
+               f"服务器返回：{res2.get('message')}\n{verify}\n\n{info}\n\n时间：{now:%Y-%m-%d %H:%M:%S}")
         return 0
 
     log(f"FAIL 打卡未成功 http={st} resp={str(res2)[:200]}")
-    if not no_mail:
-        send_mail(f"【日职考勤】打卡失败 {body['checkInTime']}",
-                  f"结论：打卡未成功，请手动打开 App 确认。\n\n提交：{json.dumps(body, ensure_ascii=False)}\n"
-                  f"返回（http={st}）：{str(res2)[:400]}\n\n{info}\n\n时间：{now:%Y-%m-%d %H:%M:%S}")
+    notify(f"【日职考勤】打卡失败 {body['checkInTime']}",
+           f"结论：打卡未成功，请手动打开 App 确认。\n\n提交：{json.dumps(body, ensure_ascii=False)}\n"
+           f"返回（http={st}）：{str(res2)[:400]}\n\n{info}\n\n时间：{now:%Y-%m-%d %H:%M:%S}")
     return 3
 
 

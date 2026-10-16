@@ -7,8 +7,9 @@
     happy    每日 19:00（随机延迟后执行 happy_checkin.py）—— 晚自习打卡
     portal   每 interval_minutes 分钟执行 portal-auth.sh —— 校园网 Portal 认证
 
-打卡前提醒：每个打卡任务可在触发点前 notify_before_min 分钟发送提醒邮件
-（窗口 = 触发点前 notify_before_min 分钟 ~ 前 5 分钟，错过窗口不发；0 = 关闭）。
+打卡前预检：每个打卡任务在触发点前 notify_before_min 分钟执行一次预检
+（即调用对应脚本的 --precheck 模式：查询今日状态后，仅在"待打卡/预检失败"时发邮件；
+窗口 = 触发点前 notify_before_min 分钟 ~ 前 5 分钟，错过窗口不执行；0 = 关闭）。
 失败重试：任务退出码为 2/3 时，在 retry_after_min 分钟后重试一次；其余不重试。
 错过触发点超过 GRACE_MIN 分钟（如深夜启动）则不补跑。
 """
@@ -27,7 +28,7 @@ SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts')
 
 RETRY_CODES = (2, 3)      # 需要重试的退出码
 GRACE_MIN = 90            # 错过触发点超过这个分钟数就不补跑
-NOTIFY_WINDOW_MIN = 5     # 提醒窗口收尾：距触发点不足 5 分钟就不再提醒
+NOTIFY_WINDOW_MIN = 5     # 预检窗口收尾：距触发点不足 5 分钟就不再预检
 
 
 def log(msg: str) -> None:
@@ -67,13 +68,9 @@ def run_task(name: str, argv: list, delay_max: int, retry_min: int) -> None:
         log(f"{name}: 重试完成 rc={rc2}")
 
 
-def send_notify(name: str, label: str, hhmm: str, before_min: int) -> None:
-    """线程内发送打卡前提醒邮件"""
-    subject = f"【RVTU-bot】{label}将在 {hhmm} 自动执行"
-    body = (f"提醒：{label}将在约 {before_min} 分钟后（{hhmm}）自动执行。\n"
-            f"如需阻止本次打卡，请在此之前关闭容器（docker compose stop / docker stop）。\n"
-            f"时间：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
-    spawn(f'{name}-notify', ['python3', os.path.join(SCRIPTS, 'notify.py'), subject, body])
+def send_precheck(name: str, script: str) -> None:
+    """线程内执行打卡前预检：脚本查询今日状态后，仅在“待打卡/预检失败”时发邮件"""
+    spawn(f'{name}-precheck', ['python3', os.path.join(SCRIPTS, script), '--precheck'])
 
 
 def main() -> None:
@@ -86,6 +83,7 @@ def main() -> None:
                       delay=int(c.get('random_delay_sec_max', 59)),
                       retry=int(c.get('retry_after_min', 20)),
                       notify=int(c.get('notify_before_min', 15)),
+                      precheck='checkin.py',
                       argv=['python3', os.path.join(SCRIPTS, 'checkin.py')]))
     h = sched.get('happy') or {}
     daily.append(dict(name='happy', label='晚自习打卡',
@@ -93,12 +91,13 @@ def main() -> None:
                       delay=int(h.get('random_delay_sec_max', 59)),
                       retry=int(h.get('retry_after_min', 20)),
                       notify=int(h.get('notify_before_min', 15)),
+                      precheck='happy_checkin.py',
                       argv=['python3', os.path.join(SCRIPTS, 'happy_checkin.py')]))
     p = sched.get('portal') or {}
     portal_interval = int(p.get('interval_minutes', 1))
 
     for t in daily:
-        note = f"，提前 {t['notify']} 分钟邮件提醒" if t['notify'] > 0 else ""
+        note = f"，提前 {t['notify']} 分钟预检（按状态选择性提醒）" if t['notify'] > 0 else ""
         log(f"任务 {t['name']}: 每日 {t['hour']:02d}:{t['minute']:02d}"
             f"（随机延迟 0~{t['delay']}s，失败 {t['retry']} 分钟后重试{note}）")
     log(f"任务 portal: 每 {portal_interval} 分钟一次")
@@ -112,22 +111,21 @@ def main() -> None:
         for t in daily:
             target = now.replace(hour=t['hour'], minute=t['minute'], second=0, microsecond=0)
 
-            # ---- 打卡前提醒 ----
+            # ---- 打卡前预检 ----
             nb = t['notify']
             if nb > 0:
-                nkey = (t['name'] + '-notify', now.date())
+                nkey = (t['name'] + '-precheck', now.date())
                 if nkey not in fired:
                     ntarget = target - datetime.timedelta(minutes=nb)
                     deadline = target - datetime.timedelta(minutes=NOTIFY_WINDOW_MIN)
                     if now >= ntarget:
                         fired.add(nkey)
                         if now <= deadline:
-                            hhmm = f"{t['hour']:02d}:{t['minute']:02d}"
-                            threading.Thread(target=send_notify,
-                                             args=(t['name'], t['label'], hhmm, nb),
+                            threading.Thread(target=send_precheck,
+                                             args=(t['name'], t['precheck']),
                                              daemon=True).start()
                         else:
-                            log(f"{t['name']}: 提醒窗口已错过（距触发不足 {NOTIFY_WINDOW_MIN} 分钟），跳过")
+                            log(f"{t['name']}: 预检窗口已错过（距触发不足 {NOTIFY_WINDOW_MIN} 分钟），跳过")
 
             # ---- 打卡任务 ----
             key = (t['name'], now.date())
