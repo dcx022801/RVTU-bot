@@ -53,6 +53,7 @@ def call(method, path, token=None, body=None):
     r = urllib.request.Request(BASE + path, data=data, method=method)
     r.add_header('User-Agent', UA)
     r.add_header('referer', 'https://rzptxsgl.rzpt.cn/ydxsxxgl/')
+    r.add_header('X-Requested-With', 'com.sdzxkj.wisdom')
     if token:
         r.add_header('x-access-token', token)
     if data:

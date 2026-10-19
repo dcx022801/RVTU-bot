@@ -94,7 +94,7 @@ for iface in $ifaces; do
     res=$(probe "$iface"); code=${res%% *}; loc=${res#* }
     case "$code" in
         204) ;;                                     # 已放行 → 静默
-        2*)  log "$iface: redirected, auth -> $loc"; login "$iface" "$loc" ;;
+        3*)  log "$iface: redirected, auth -> $loc"; login "$iface" "$loc" ;;
         "")  ;;                                     # 无响应（链路不通/探测失败）→ 静默
         *)   log "$iface: probe http $code" ;;
     esac
