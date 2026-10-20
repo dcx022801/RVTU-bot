@@ -39,7 +39,7 @@
         GPS 700m 圈判定，不查 MAC。①返回成功但复核无打卡时间时自动回退到②
     窗口 19:00 开 / 19:20 迟到线 / 19:40 关；workDays "1,2,3,4,7" = 周日+周一~周四。
 """
-import json, os, sys, random, datetime, smtplib, ssl
+import json, os, sys, time, random, datetime, smtplib, ssl
 import urllib.request, urllib.error
 from email.message import EmailMessage
 
@@ -334,7 +334,12 @@ def main() -> int:
     log(f'随机顺序（共{len(order)}个候选）：' + ' '.join(order))
     attempts = [(f'MAC通道/{m}', mac_body(m)) for m in order]
     attempts.append(('定位通道/备用', gps_body(order[0])))
+    budget_sec = 55          # 打卡执行总预算：1 分钟内完成（超时即停止继续尝试，转入复核）
+    t_start = time.time()
     for tag, body in attempts:
+        if time.time() - t_start > budget_sec:
+            log(f'WARN 打卡尝试已超过 {budget_sec}s 预算，停止继续尝试，转入复核')
+            break
         token, st, res2 = submit(token, creds, sess, body, tag)
         if isinstance(res2, dict) and res2.get('success') and not _dead(res2):
             _tok, rr, _err = fetch_detail(token)
@@ -360,6 +365,15 @@ def main() -> int:
                 return 0
             log(f"WARN {tag} 未成功 http={st} resp={str(res2)[:200]}")
         fail = f'{tag} http={st} resp={str(res2)[:200]}'
+
+    # 尝试结束（可能因预算超时中断）：复核今日状态，若已打卡则判定成功
+    _tok, rr, _err = fetch_detail(token)
+    if rr and rr.get('checkInTime'):
+        log(f"OK 复核确认今日已打卡（{rr.get('checkInTime')}），判定本次成功（最后错误：{fail}）")
+        notify(f"【日职晚自习】打卡成功（复核确认 {rr.get('checkInTime')}）",
+               f'尝试过程中已成功打卡（复核确认）。\n'
+               f'复核：时间={rr.get("checkInTime")}｜状态={STATUS_TXT.get(rr.get("status"), rr.get("status"))}｜打卡点={rr.get("venueName")}\n{stamp()}')
+        return 0
 
     log(f"FAIL 两条通道都没打上（最后一条 {fail}）")
     notify('【日职晚自习】打卡失败',
