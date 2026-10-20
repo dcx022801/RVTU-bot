@@ -349,6 +349,15 @@ def main() -> int:
                 return 0
             log(f"WARN {tag} 接口报成功但复核无打卡时间，换下一条通道重试")
         else:
+            msg = str(res2.get('message', '')) if isinstance(res2, dict) else ''
+            if '已打卡' in msg:
+                _tok, rr, _err = fetch_detail(token)
+                t = (rr or {}).get('checkInTime') or '服务端确认已打卡'
+                log(f"OK {tag} 服务端反馈今日已打卡，判定本次成功｜打卡时间={t}")
+                notify('【日职晚自习】打卡成功（服务端确认）',
+                       f'服务端反馈「{msg}」，判定为打卡成功（常见于提交请求超时、服务端已受理）。\n'
+                       f'通道：{tag}｜打卡时间：{t}\n{stamp()}')
+                return 0
             log(f"WARN {tag} 未成功 http={st} resp={str(res2)[:200]}")
         fail = f'{tag} http={st} resp={str(res2)[:200]}'
 

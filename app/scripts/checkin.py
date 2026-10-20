@@ -301,10 +301,24 @@ def main() -> int:
             else:
                 verify = '复核：接口未返回记录（result 为空）'
             log(verify)
-        notify(f"【日职考勤】打卡成功 {body['checkInTime']}",
-               f"结论：打卡成功。\n\n提交：日期={body['checkInDate']} 时间={body['checkInTime']} 方式=手机签到\n"
-               f"服务器返回：{res2.get('message')}\n{verify}\n\n{info}\n\n时间：{now:%Y-%m-%d %H:%M:%S}")
+        if not no_mail:
+            send_mail(f"【日职考勤】打卡成功 {body['checkInTime']}",
+                      f"结论：打卡成功。\n\n提交：日期={body['checkInDate']} 时间={body['checkInTime']} 方式=手机签到\n"
+                      f"服务器返回：{res2.get('message')}\n{verify}\n\n{info}\n\n时间：{now:%Y-%m-%d %H:%M:%S}")
         return 0
+
+    # 提交失败/超时后复核：若服务端已有今日打卡记录，视为成功（常见于请求超时但服务端已受理）
+    st3, res3 = api('GET', '/mobile/attendance/records/v1/detail', token=token)
+    if isinstance(res3, dict) and res3.get('success'):
+        rr = res3.get('result')
+        if isinstance(rr, dict) and rr.get('checkInTime'):
+            log(f"OK 复核发现今日已打卡（{rr.get('checkInTime')}），判定本次成功（原提交 http={st} resp={str(res2)[:120]}）")
+            if not no_mail:
+                send_mail(f"【日职考勤】打卡成功 {rr.get('checkInTime')}（复核确认）",
+                          f"结论：打卡成功（原提交响应异常，复核确认已有打卡记录）。\n\n"
+                          f"复核：时间={rr.get('checkInTime')}｜状态={STATUS_TXT.get(rr.get('status'), rr.get('status'))}\n"
+                          f"原响应（http={st}）：{str(res2)[:300]}\n\n{info}\n\n时间：{now:%Y-%m-%d %H:%M:%S}")
+            return 0
 
     log(f"FAIL 打卡未成功 http={st} resp={str(res2)[:200]}")
     notify(f"【日职考勤】打卡失败 {body['checkInTime']}",
