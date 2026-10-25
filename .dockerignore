@@ -2,7 +2,21 @@
 config/
 state/
 
+# 本地敏感配置与测试产物
+.env
+.env.*
+!.env.example
+*.log
+
 # 文档与仓库元数据不必进入构建上下文
 README.md
 README.local.md
 .git/
+
+# Python 缓存
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+
+# 测试脚手架
+tests/

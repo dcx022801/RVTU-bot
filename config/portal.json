@@ -1,8 +1,16 @@
 {
   "_说明": [
     "umac：被认证网卡 MAC（认证请求参数 umac；留空则回退自动解析：302 跳转值优先，其次本机网卡）",
-    "uplinkMac：上联设备 MAC（认证请求参数 apmac；留空则传空）"
+    "uplinkMac：上联设备 MAC（认证请求参数 apmac；留空则传空）",
+    "allowedHosts：允许提交账号密码的门户主机白名单（主机名或 IP，逗号分隔；留空且 allowAny=false 时默认拒绝提交）",
+    "allowedSchemes：允许的协议数组，默认 [\"https\", \"http\"]",
+    "allowAny：true 时跳过 host 白名单（不安全，仅用于临时排障）",
+    "macFormat：auto / colon / hyphen，控制提交 MAC 的分隔符"
   ],
   "umac": "<被认证网卡 MAC，可留空>",
-  "uplinkMac": "<上联设备 MAC，可留空>"
+  "uplinkMac": "<上联设备 MAC，可留空>",
+  "allowedHosts": [],
+  "allowedSchemes": ["https", "http"],
+  "allowAny": false,
+  "macFormat": "auto"
 }

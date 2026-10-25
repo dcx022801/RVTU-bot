@@ -11,3 +11,6 @@ state/*
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 测试输出
+tests/*.out

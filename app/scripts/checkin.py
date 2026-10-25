@@ -33,6 +33,9 @@
 import json, os, sys, smtplib, ssl, urllib.request, urllib.error, datetime
 from email.message import EmailMessage
 
+from configutil import ConfigError, load_api, load_creds, load_mail, load_schedule
+from logutil import append_log
+
 CONFIG_DIR = os.environ.get('CONFIG_DIR', '/config')
 DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', '/defaults')
 STATE_DIR = os.environ.get('STATE_DIR', '/state')
@@ -59,13 +62,8 @@ STATUS_TXT = {0: '未打卡', 1: '正常', 2: '迟到', 3: '缺勤', 4: '异常'
 
 def log(msg: str) -> None:
     line = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
-    print(line)
-    try:
-        os.makedirs(LOGDIR, exist_ok=True)
-        with open(LOG, 'a', encoding='utf-8') as f:
-            f.write(line + '\n')
-    except Exception:
-        pass
+    print(line, flush=True)
+    append_log(LOG, line)
 
 
 def load_json(path: str):
@@ -144,10 +142,10 @@ def relogin(creds: dict, sess: dict) -> str:
     raise RuntimeError(f'重新登录失败 http={st} resp={str(res)[:200]}')
 
 
-def send_mail(subject: str, body: str) -> bool:
-    m = load_json(MAILCFG)
+def send_mail(mailcfg, subject: str, body: str) -> bool:
+    m = mailcfg
     if not m:
-        log('MAIL 跳过：没有可用的 mail.json')
+        log('MAIL 跳过：未配置有效邮件')
         return False
     msg = EmailMessage()
     msg['From'] = m['sender']
@@ -172,20 +170,27 @@ def main() -> int:
     no_mail = '--no-mail' in sys.argv
     pre = '--precheck' in sys.argv
 
+    mailcfg = None
+    try:
+        mailcfg = load_mail(MAILCFG)
+    except ConfigError as exc:
+        log(f'WARN 邮件配置无效，本次不发送邮件：{exc}')
+
     def notify(subject: str, body: str) -> None:
         """统一发信入口：--dry-run / --no-mail 一律不发。"""
         if dry or no_mail:
             return
-        send_mail(subject, body)
+        send_mail(mailcfg, subject, body)
 
     def nowstr() -> str:
         return f"时间：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}"
 
     # 打卡时间（用于预检提醒文案），取自 defaults/schedule.json 的 checkin 段
     try:
-        _c = (load_json(SCHEDCFG) or {}).get('checkin') or {}
-        hhmm = f"{int(_c.get('hour', 21)):02d}:{int(_c.get('minute', 0)):02d}"
-    except Exception:
+        _c = load_schedule(SCHEDCFG)['checkin']
+        hhmm = f"{_c['hour']:02d}:{_c['minute']:02d}"
+    except ConfigError as exc:
+        log(f'WARN 调度配置无效，使用默认 21:00：{exc}')
         hhmm = '21:00'
 
     def fail_mail(what: str, detail: str) -> None:
@@ -197,20 +202,21 @@ def main() -> int:
             notify(f'【日职考勤】打卡失败（{what}）', f'{detail}\n{nowstr()}')
 
     global BASE, UA, MODULE
-    api_cfg = load_json(APICFG) or {}
-    if api_cfg.get('base'):
-        BASE = str(api_cfg['base'])
-    if api_cfg.get('ua_checkin'):
-        UA = str(api_cfg['ua_checkin'])
-    if api_cfg.get('module'):
-        MODULE = str(api_cfg['module'])
+    try:
+        api_cfg = load_api(APICFG)
+    except ConfigError as exc:
+        log(f'FAIL 接口配置错误：{exc}')
+        fail_mail('接口配置异常', f'接口配置错误：{exc}')
+        return 2
+    BASE = api_cfg['base']
+    UA = api_cfg['ua_checkin']
+    MODULE = api_cfg['module']
 
-    creds = load_json(CREDS)
-    if not creds:
-        log('FAIL creds.json 读取失败')
-        if pre:
-            notify('【日职考勤】预检失败（凭据文件异常）',
-                   f'creds.json 读取失败，无法登录打卡系统。\n今天 {hhmm} 仍会按计划尝试打卡。\n{nowstr()}')
+    try:
+        creds = load_creds(CREDS)
+    except ConfigError as exc:
+        log(f'FAIL 配置错误：{exc}')
+        fail_mail('凭据配置异常', f'{exc}')
         return 2
     sess = load_json(SESSION) or {}
     token = sess.get('token') or ''
@@ -302,7 +308,7 @@ def main() -> int:
                 verify = '复核：接口未返回记录（result 为空）'
             log(verify)
         if not no_mail:
-            send_mail(f"【日职考勤】打卡成功 {body['checkInTime']}",
+            send_mail(mailcfg, f"【日职考勤】打卡成功 {body['checkInTime']}",
                       f"结论：打卡成功。\n\n提交：日期={body['checkInDate']} 时间={body['checkInTime']} 方式=手机签到\n"
                       f"服务器返回：{res2.get('message')}\n{verify}\n\n{info}\n\n时间：{now:%Y-%m-%d %H:%M:%S}")
         return 0
@@ -314,7 +320,7 @@ def main() -> int:
         if isinstance(rr, dict) and rr.get('checkInTime'):
             log(f"OK 复核发现今日已打卡（{rr.get('checkInTime')}），判定本次成功（原提交 http={st} resp={str(res2)[:120]}）")
             if not no_mail:
-                send_mail(f"【日职考勤】打卡成功 {rr.get('checkInTime')}（复核确认）",
+                send_mail(mailcfg, f"【日职考勤】打卡成功 {rr.get('checkInTime')}（复核确认）",
                           f"结论：打卡成功（原提交响应异常，复核确认已有打卡记录）。\n\n"
                           f"复核：时间={rr.get('checkInTime')}｜状态={STATUS_TXT.get(rr.get('status'), rr.get('status'))}\n"
                           f"原响应（http={st}）：{str(res2)[:300]}\n\n{info}\n\n时间：{now:%Y-%m-%d %H:%M:%S}")

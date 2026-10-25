@@ -43,6 +43,10 @@ import json, os, sys, time, random, datetime, smtplib, ssl
 import urllib.request, urllib.error
 from email.message import EmailMessage
 
+from configutil import (ConfigError, load_api, load_creds, load_location,
+                        load_macs, load_mail, load_schedule, optional_bool)
+from logutil import append_log
+
 CONFIG_DIR = os.environ.get('CONFIG_DIR', '/config')
 DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', '/defaults')
 STATE_DIR = os.environ.get('STATE_DIR', '/state')
@@ -73,13 +77,8 @@ CHECKIN = '/mobile/apattendance/checkin-record/v1/check/in'
 
 def log(msg: str) -> None:
     line = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
-    print(line)
-    try:
-        os.makedirs(LOGDIR, exist_ok=True)
-        with open(LOG, 'a', encoding='utf-8') as f:
-            f.write(line + '\n')
-    except Exception:
-        pass
+    print(line, flush=True)
+    append_log(LOG, line)
 
 
 def load_json(path: str):
@@ -101,11 +100,11 @@ def save_session(s: dict) -> None:
         pass
 
 
-def send_mail(subject: str, body: str) -> bool:
+def send_mail(mailcfg, subject: str, body: str) -> bool:
     """发结果邮件；配置缺失或发送失败都只记日志，不影响打卡结果。"""
-    m = load_json(MAILCFG)
+    m = mailcfg
     if not m:
-        log('MAIL 跳过：没有可用的 mail.json')
+        log('MAIL 跳过：未配置有效邮件')
         return False
     msg = EmailMessage()
     msg['From'] = m['sender']
@@ -124,7 +123,10 @@ def send_mail(subject: str, body: str) -> bool:
         return False
 
 
-def api(method: str, path: str, token: str = None, body: dict = None):
+def api(method: str, path: str, token: str = None, body: dict = None,
+        timeout: float = 25, deadline: float = None):
+    if deadline is not None:
+        timeout = max(1.0, deadline - time.monotonic())
     data = json.dumps(body).encode() if body is not None else None
     r = urllib.request.Request(BASE + path, data=data, method=method)
     r.add_header('User-Agent', UA)
@@ -135,7 +137,7 @@ def api(method: str, path: str, token: str = None, body: dict = None):
     if data:
         r.add_header('Content-Type', 'application/json')
     try:
-        with urllib.request.urlopen(r, timeout=25) as resp:
+        with urllib.request.urlopen(r, timeout=timeout) as resp:
             raw = resp.read().decode('utf-8', 'ignore')
             try:
                 return resp.status, json.loads(raw)
@@ -151,12 +153,12 @@ def api(method: str, path: str, token: str = None, body: dict = None):
         return -1, str(e)
 
 
-def relogin(creds: dict, sess: dict) -> str:
+def relogin(creds: dict, sess: dict, deadline: float = None) -> str:
     """用 creds.json 的 user（身份证号）重新登录，新 token 写回 session"""
     pub, enc = sess.get('publicKeyBase64'), sess.get('idCardEnc')
     plain = creds.get('user')
     if plain:
-        st0, r0 = api('GET', '/mobile_auth/public_key')
+        st0, r0 = api('GET', '/mobile_auth/public_key', deadline=deadline)
         if isinstance(r0, dict) and r0.get('result'):
             try:
                 if SCRIPTS_DIR not in sys.path:
@@ -171,7 +173,7 @@ def relogin(creds: dict, sess: dict) -> str:
         'idCard': enc,
         'module': MODULE,
         'publicKeyBase64': pub,
-    })
+    }, deadline=deadline)
     if isinstance(res, dict) and res.get('success') and (res.get('result') or {}).get('token'):
         sess['token'] = res['result']['token']
         sess['publicKeyBase64'] = pub
@@ -187,21 +189,22 @@ def _dead(r) -> bool:
     return ('失效' in m) or ('重新登录' in m)
 
 
-def fetch_detail(token: str):
-    st, res = api('GET', DETAIL, token=token)
+def fetch_detail(token: str, deadline: float = None):
+    st, res = api('GET', DETAIL, token=token, deadline=deadline)
     if isinstance(res, dict) and res.get('success') and isinstance(res.get('result'), dict):
         return token, res['result'], None
     return token, None, f'http={st} resp={str(res)[:200]}'
 
 
-def submit(token: str, creds: dict, sess: dict, body: dict, tag: str):
+def submit(token: str, creds: dict, sess: dict, body: dict, tag: str,
+           deadline: float = None):
     """POST check/in；遇 token 失效自动重登后重试一次。返回 (token, http状态, 响应)"""
-    st, res = api('POST', CHECKIN, token=token, body=body)
+    st, res = api('POST', CHECKIN, token=token, body=body, deadline=deadline)
     if _dead(res):
         log(f"WARN {tag} token 失效：{res.get('message')}，重新登录后重试一次…")
         try:
-            token = relogin(creds, sess)
-            st, res = api('POST', CHECKIN, token=token, body=body)
+            token = relogin(creds, sess, deadline=deadline)
+            st, res = api('POST', CHECKIN, token=token, body=body, deadline=deadline)
         except Exception as e:
             log(f'FAIL {tag} 重登录失败：{type(e).__name__}: {e}')
     return token, st, res
@@ -213,20 +216,29 @@ def main() -> int:
     no_mail = '--no-mail' in sys.argv
     pre = '--precheck' in sys.argv
 
+    mailcfg = None
+    try:
+        mailcfg = load_mail(MAILCFG)
+    except ConfigError as exc:
+        log(f'WARN 邮件配置无效，本次不发送邮件：{exc}')
+
     def notify(subject: str, body: str) -> None:
         """统一发信入口：--dry-run / --no-mail 一律不发。"""
         if dry or no_mail:
             return
-        send_mail(subject, body)
+        send_mail(mailcfg, subject, body)
 
     def stamp() -> str:
         return f'时间：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}'
 
-    # 打卡时间（用于预检提醒文案），取自 defaults/schedule.json 的 happy 段
+    # 打卡时间与执行预算，取自 defaults/schedule.json 的 happy 段
+    budget_sec = 55
     try:
-        _h = (load_json(SCHEDCFG) or {}).get('happy') or {}
-        hhmm = f"{int(_h.get('hour', 19)):02d}:{int(_h.get('minute', 0)):02d}"
-    except Exception:
+        _h = load_schedule(SCHEDCFG)['happy']
+        hhmm = f"{_h['hour']:02d}:{_h['minute']:02d}"
+        budget_sec = int(_h.get('budget_sec', 55))
+    except ConfigError as exc:
+        log(f'WARN 调度配置无效，使用默认 19:00 / 55 秒预算：{exc}')
         hhmm = '19:00'
 
     def fail_mail(what: str, detail: str) -> None:
@@ -238,35 +250,39 @@ def main() -> int:
             notify(f'【日职晚自习】打卡失败（{what}）', f'{detail}\n{stamp()}')
 
     global BASE, UA, MODULE
-    api_cfg = load_json(APICFG) or {}
-    if api_cfg.get('base'):
-        BASE = str(api_cfg['base'])
-    if api_cfg.get('ua_happy'):
-        UA = str(api_cfg['ua_happy'])
-    if api_cfg.get('module'):
-        MODULE = str(api_cfg['module'])
+    try:
+        api_cfg = load_api(APICFG)
+    except ConfigError as exc:
+        log(f'FAIL 接口配置错误：{exc}')
+        fail_mail('接口配置异常', f'接口配置错误：{exc}')
+        return 2
+    BASE = api_cfg['base']
+    UA = api_cfg['ua_happy']
+    MODULE = api_cfg['module']
 
-    creds = load_json(CREDS)
-    if not creds:
-        log('FAIL creds.json 读取失败')
-        fail_mail('凭据文件异常', 'creds.json 读取失败，无法登录打卡系统。')
+    try:
+        creds = load_creds(CREDS)
+    except ConfigError as exc:
+        log(f'FAIL 配置错误：{exc}')
+        fail_mail('凭据配置异常', f'{exc}')
         return 2
 
-    macs_cfg = load_json(MACSCFG) or {}
-    mac_list = [str(m).strip() for m in (macs_cfg.get('macs') or []) if str(m).strip()]
-    if not mac_list:
-        log('FAIL macs.json 缺失或 macs 列表为空')
-        fail_mail('MAC 池未配置', 'macs.json 缺失或 macs 列表为空，无法执行 MAC 通道打卡。')
+    try:
+        mac_list = load_macs(MACSCFG)
+    except ConfigError as exc:
+        log(f'FAIL MAC 配置错误：{exc}')
+        fail_mail('MAC 池未配置', f'{exc}')
         return 2
 
-    loc = load_json(LOCCFG) or {}
-    lat = str(loc.get('latitude') or '').strip()
-    lon = str(loc.get('longitude') or '').strip()
-    loc_info = str(loc.get('locationInfo') or '').strip()
-    if not (lat and lon):
-        log('FAIL location.json 缺失或坐标为空')
-        fail_mail('坐标未配置', 'location.json 缺失或坐标为空，无法执行定位通道打卡。')
+    try:
+        loc = load_location(LOCCFG)
+    except ConfigError as exc:
+        log(f'FAIL 定位配置错误：{exc}')
+        fail_mail('坐标未配置', f'{exc}')
         return 2
+    lat = loc['latitude']
+    lon = loc['longitude']
+    loc_info = loc['locationInfo']
 
     def mac_body(mac: str) -> dict:
         return {'macAddress': mac, 'checkInMethod': 1}
@@ -299,9 +315,19 @@ def main() -> int:
             f"打卡点={r.get('venueName')}｜窗口 {r.get('normalCheckinStart')}-{r.get('normalCheckinEnd')}-{r.get('lateCheckinDeadline')}")
     log(f'状态: {info}')
 
+    workday_raw = r.get('workDayToday')
+    workday = optional_bool(workday_raw)
+    can_check = optional_bool(r.get('canCheckIn'))
+    if workday is None:
+        log(f'WARN workDayToday 字段异常（{str(workday_raw)[:40]}），按待打卡处理')
+        if can_check is False:
+            log('SKIP-NOTWORKDAY workDayToday 异常且 canCheckIn=False，按非上课日跳过')
+            workday = False
+    workday_warning = '\n注意：上课日字段异常，已按待打卡处理。' if workday is None else ''
+
     if pre:
         # ---- 预检模式：仅“待打卡”发提醒；“已打卡/非上课日”静默 ----
-        if not r.get('workDayToday'):
+        if workday is False:
             log(f"PRECHECK 今日非晚自习上课日（workDays={r.get('workDays')}），静默不发邮件")
             return 6
         if r.get('checkInTime'):
@@ -310,10 +336,11 @@ def main() -> int:
         log(f'PRECHECK 今日待打卡，发送打卡前提醒（{hhmm}）')
         notify(f'【日职晚自习】将在 {hhmm} 自动打卡（预检：未打卡）',
                f'预检结果：今日需打卡且尚未打卡，{hhmm} 将自动执行。\n'
-               f'如需阻止本次打卡，请在此之前关闭容器（docker compose stop / docker stop）。\n\n{info}\n{stamp()}')
+               f'如需阻止本次打卡，请在此之前关闭容器（docker compose stop / docker stop）。\n\n'
+               f'{info}{workday_warning}\n{stamp()}')
         return 0
 
-    if not r.get('workDayToday'):
+    if workday is False:
         # 非上课日：完全静默（不发邮件，对齐原微信汇报的 rc=6 静默逻辑）
         log(f"SKIP-NOTWORKDAY 今日非晚自习上课日（workDays={r.get('workDays')}），不打卡、不发邮件")
         return 6
@@ -334,15 +361,17 @@ def main() -> int:
     log(f'随机顺序（共{len(order)}个候选）：' + ' '.join(order))
     attempts = [(f'MAC通道/{m}', mac_body(m)) for m in order]
     attempts.append(('定位通道/备用', gps_body(order[0])))
-    budget_sec = 55          # 打卡执行总预算：1 分钟内完成（超时即停止继续尝试，转入复核）
-    t_start = time.time()
+    overall_deadline = time.monotonic() + budget_sec
+    reserve = min(5.0, max(1.0, budget_sec * 0.1))
+    attempt_deadline = overall_deadline - reserve
+    log(f'执行预算 {budget_sec}s（预留 {reserve:.0f}s 用于最终复核）')
     for tag, body in attempts:
-        if time.time() - t_start > budget_sec:
-            log(f'WARN 打卡尝试已超过 {budget_sec}s 预算，停止继续尝试，转入复核')
+        if time.monotonic() >= attempt_deadline:
+            log(f'WARN 打卡尝试已达到 {budget_sec}s 预算，停止继续尝试，转入复核')
             break
-        token, st, res2 = submit(token, creds, sess, body, tag)
+        token, st, res2 = submit(token, creds, sess, body, tag, deadline=attempt_deadline)
         if isinstance(res2, dict) and res2.get('success') and not _dead(res2):
-            _tok, rr, _err = fetch_detail(token)
+            _tok, rr, _err = fetch_detail(token, deadline=attempt_deadline)
             if rr and rr.get('checkInTime'):
                 log(f"OK {tag} 打卡成功 -> {res2.get('message')}｜复核：时间={rr.get('checkInTime')}"
                     f"｜状态={STATUS_TXT.get(rr.get('status'), rr.get('status'))}｜打卡点={rr.get('venueName')}")
@@ -356,7 +385,7 @@ def main() -> int:
         else:
             msg = str(res2.get('message', '')) if isinstance(res2, dict) else ''
             if '已打卡' in msg:
-                _tok, rr, _err = fetch_detail(token)
+                _tok, rr, _err = fetch_detail(token, deadline=attempt_deadline)
                 t = (rr or {}).get('checkInTime') or '服务端确认已打卡'
                 log(f"OK {tag} 服务端反馈今日已打卡，判定本次成功｜打卡时间={t}")
                 notify('【日职晚自习】打卡成功（服务端确认）',
@@ -367,7 +396,12 @@ def main() -> int:
         fail = f'{tag} http={st} resp={str(res2)[:200]}'
 
     # 尝试结束（可能因预算超时中断）：复核今日状态，若已打卡则判定成功
-    _tok, rr, _err = fetch_detail(token)
+    remaining = overall_deadline - time.monotonic()
+    if remaining <= 0.5:
+        log('WARN 预算已用尽，跳过最终复核')
+        rr = None
+    else:
+        _tok, rr, _err = fetch_detail(token, deadline=overall_deadline)
     if rr and rr.get('checkInTime'):
         log(f"OK 复核确认今日已打卡（{rr.get('checkInTime')}），判定本次成功（最后错误：{fail}）")
         notify(f"【日职晚自习】打卡成功（复核确认 {rr.get('checkInTime')}）",

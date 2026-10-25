@@ -18,12 +18,16 @@
 - **结果邮件**：每次执行结果发送到配置的邮箱
 - **随机延迟**：到点后随机延迟再执行，避免固定整点请求
 - **配置分层**：用户配置 / 程序参数 / 运行态三层分离，互不干扰
+- **配置校验**：缺失、占位符、非法 MAC/坐标/时间在发请求前拒绝，避免误提交
+- **调度持久化**：当日任务与待重试状态落盘，容器重启不会重复打卡，也不会丢失等待中的重试
+- **Portal 白名单**：只向 `portal.allowedHosts` 内的主机提交账号密码，默认 fail-closed
+- **运行加固**：业务进程降权到非 root；容器只读根文件系统、资源限制、健康检查、日志轮转
 
 > 是否参与打卡完全由容器开关决定：在学校时保持容器运行，假期/长期不在学校时关闭容器即可。
 
 ## 快速开始
 
-要求：x86_64 Linux + Docker（含 compose 插件）。
+要求：x86_64 Linux + Docker，Compose 插件 >= 2.24（`env_file.required` 语法）。
 
 ```sh
 # 1. 获取代码
@@ -32,6 +36,8 @@ git clone git@github.com:dcx022801/RVTU-bot.git && cd RVTU-bot
 # 2. 配置（二选一）
 #    · 推荐：cp .env.example .env 后按注释填写
 #    · 或：编辑 config/ 下的 5 个 JSON 文件
+#    注意：PORTAL_ALLOWED_HOSTS（或 portal.allowedHosts）必须填写合法门户主机，
+#          否则 Portal 认证默认拒绝提交凭据（fail-closed）
 
 # 3. 拉取已发布镜像并启动（无需本地构建；或 docker compose up -d --build 本地构建）
 docker compose pull
@@ -44,6 +50,8 @@ docker logs -f rvtu-bot
 > 需要 host 网络模式，请在 Linux 宿主机上部署（Windows Docker Desktop 不支持）。
 
 > 镜像托管在 ghcr（私有包），拉取前登录一次：`echo <GitHub Token> | docker login ghcr.io -u dcx022801 --password-stdin`。
+>
+> 生产建议在 `.env` 设置 `RVTU_IMAGE=ghcr.io/...@sha256:<digest>` 固定镜像，避免 `latest` 漂移。
 
 ## 配置
 
@@ -54,26 +62,42 @@ docker logs -f rvtu-bot
 
 两种方式同时存在时，`.env` 优先。修改配置后 `docker compose restart` 生效。
 
+Portal 关键配置：
+- `PORTAL_ALLOWED_HOSTS` / `portal.allowedHosts`：允许提交账号密码的门户主机白名单，必填。
+- `PORTAL_ALLOW_ANY=1` / `portal.allowAny=true`：仅临时排障时跳过白名单，不安全。
+- `portal.macFormat`：`auto` / `colon` / `hyphen`，控制提交 MAC 的分隔符。
+
 > 程序参数（调度时间、打卡前提醒分钟数等）在 `defaults/` 目录，一般无需修改。
+> `notify_before_min` 只能填 `0`（关闭预检）或 `>=6`；1~5 会落在空窗口，启动时自动关闭并告警。
 
 ## 常用操作
 
+> 业务进程以 UID 100 运行且容器 `cap_drop: ALL`，手动业务命令请带 `--user 100:101`；否则 root 无法读取 600 配置。
+
 ```sh
 # 预演（不会真实打卡、不发邮件）
-docker exec rvtu-bot python3 /app/scripts/checkin.py --dry-run
-docker exec rvtu-bot python3 /app/scripts/happy_checkin.py --dry-run
+docker exec --user 100:101 rvtu-bot python3 /app/scripts/checkin.py --dry-run
+docker exec --user 100:101 rvtu-bot python3 /app/scripts/happy_checkin.py --dry-run
 
 # 检查登录态
-docker exec rvtu-bot python3 /app/scripts/refresh_creds.py --check
+docker exec --user 100:101 rvtu-bot python3 /app/scripts/refresh_creds.py --check
 
 # 手动跑一次校园网认证
-docker exec rvtu-bot sh /app/scripts/portal-auth.sh
+docker exec --user 100:101 rvtu-bot sh /app/scripts/portal-auth.sh
 
 # 测试打卡前预检（只查询状态并打印，不发信）
-docker exec rvtu-bot python3 /app/scripts/notify.py --dry-run "测试提醒" "测试内容"   # 通用发信工具
-docker exec rvtu-bot python3 /app/scripts/happy_checkin.py --precheck --dry-run
-docker exec rvtu-bot python3 /app/scripts/checkin.py --precheck --dry-run
+docker exec --user 100:101 rvtu-bot python3 /app/scripts/notify.py --dry-run "测试提醒" "测试内容"   # 通用发信工具
+docker exec --user 100:101 rvtu-bot python3 /app/scripts/happy_checkin.py --precheck --dry-run
+docker exec --user 100:101 rvtu-bot python3 /app/scripts/checkin.py --precheck --dry-run
 ```
+
+## 验证
+
+```sh
+python3 tests/verify.py
+```
+
+离线运行：使用临时目录、假数据和本地 mock，不访问真实学校接口或 SMTP。
 
 ## 免责声明
 

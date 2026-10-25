@@ -15,7 +15,9 @@
     python3 refresh_creds.py                  # 用 creds.json 里的 user（身份证号）登录
     python3 refresh_creds.py <身份证号>        # 用指定身份证号登录（自动拉最新公钥 -> 加密 -> 登录 -> 落盘）
 """
-import base64, json, os, secrets, sys, urllib.request, urllib.error
+import argparse, base64, json, os, secrets, sys, urllib.request, urllib.error
+
+from configutil import ConfigError, load_api, load_creds, require_text
 
 CONFIG_DIR = os.environ.get('CONFIG_DIR', '/config')
 DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', '/defaults')
@@ -35,17 +37,10 @@ MODULE = 'sskq'
 def _load_api():
     """从 defaults/api.json 覆盖 BASE / UA / MODULE"""
     global BASE, UA, MODULE
-    try:
-        with open(APICFG, encoding='utf-8') as f:
-            d = json.load(f)
-        if d.get('base'):
-            BASE = str(d['base'])
-        if d.get('ua_checkin'):
-            UA = str(d['ua_checkin'])
-        if d.get('module'):
-            MODULE = str(d['module'])
-    except Exception:
-        pass
+    cfg = load_api(APICFG)
+    BASE = cfg['base']
+    UA = cfg['ua_checkin']
+    MODULE = cfg['module']
 
 
 def call(method, path, token=None, body=None):
@@ -129,27 +124,45 @@ def save_session(s):
 
 
 def main():
-    _load_api()
-    creds = load_json(CREDS) or {}
+    parser = argparse.ArgumentParser(description='刷新或检查 RVTU-bot 登录凭据')
+    parser.add_argument('user', nargs='?', help='身份证号（省略时使用 creds.json）')
+    parser.add_argument('--check', action='store_true', help='只检查当前 token 是否有效')
+    parser.add_argument('--cipher', help='外部提供的 idCard 密文（需带值）')
+    args = parser.parse_args()
+
+    if args.cipher is not None and not args.cipher.strip():
+        parser.error('--cipher 不能为空')
+
+    try:
+        _load_api()
+    except ConfigError as exc:
+        print(f'FAIL 接口配置错误：{exc}')
+        return 2
     sess = load_json(SESSION) or {}
 
-    if '--check' in sys.argv:
+    if args.check:
         st, res = call('GET', '/mobile/attendance/records/v1/detail', token=sess.get('token'))
         ok = isinstance(res, dict) and res.get('success') and isinstance(res.get('result'), dict)
         print(f'token 有效性: {"有效" if ok else "无效/失效"} (http={st})')
-        print(str(res)[:300])
+        if not ok:
+            message = res.get('message') if isinstance(res, dict) else str(res)[:160]
+            print(f'响应: {message}')
         return 0 if ok else 1
 
-    args = [a for a in sys.argv[1:] if not a.startswith('-')]
-    cipher = sys.argv[sys.argv.index('--cipher') + 1].strip() if '--cipher' in sys.argv else None
-    if not args and not cipher:
-        plain = str(creds.get('user') or '').strip()
-        if not plain:
-            print('FAIL 未提供身份证号，且 creds.json 的 user 为空')
-            print(__doc__)
+    cipher = args.cipher.strip() if args.cipher else None
+    if not args.user and not cipher:
+        try:
+            creds = load_creds(CREDS)
+        except ConfigError as exc:
+            print(f'FAIL 配置错误：{exc}')
             return 2
+        plain = creds['user']
     else:
-        plain = args[0].strip() if args else ''
+        try:
+            plain = require_text(args.user, '身份证号') if args.user else ''
+        except ConfigError as exc:
+            print(f'FAIL {exc}')
+            return 2
 
     st, res = call('GET', '/mobile_auth/public_key')
     pub = (res or {}).get('result') if isinstance(res, dict) else None
@@ -163,7 +176,11 @@ def main():
         enc = cipher
         print(f'使用外部提供的 idCard 密文 len={len(enc)}')
     else:
-        enc = rsa_encrypt(pub, plain)
+        try:
+            enc = rsa_encrypt(pub, plain)
+        except Exception as exc:
+            print(f'FAIL 身份信息加密失败：{type(exc).__name__}: {exc}')
+            return 2
         print(f'账号已加密 len={len(enc)}')
 
     st, res = call('POST', '/mobile_auth/stu_login', body={

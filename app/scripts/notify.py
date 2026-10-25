@@ -15,8 +15,11 @@
 
 退出码: 0 成功 / 1 发送失败（配置缺失或 SMTP 异常）
 """
-import json, os, sys, smtplib, ssl, datetime
+import os, sys, smtplib, ssl, datetime
 from email.message import EmailMessage
+
+from configutil import ConfigError, load_mail
+from logutil import append_log
 
 CONFIG_DIR = os.environ.get('CONFIG_DIR', '/config')
 STATE_DIR = os.environ.get('STATE_DIR', '/state')
@@ -27,27 +30,18 @@ LOG = os.path.join(LOGDIR, 'notify.log')
 
 def log(msg: str) -> None:
     line = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
-    print(line)
-    try:
-        os.makedirs(LOGDIR, exist_ok=True)
-        with open(LOG, 'a', encoding='utf-8') as f:
-            f.write(line + '\n')
-    except Exception:
-        pass
-
-
-def load_json(path: str):
-    try:
-        with open(path, encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return None
+    print(line, flush=True)
+    append_log(LOG, line)
 
 
 def send_mail(subject: str, body: str) -> bool:
-    m = load_json(MAILCFG)
+    try:
+        m = load_mail(MAILCFG)
+    except ConfigError as exc:
+        log(f'MAIL 配置错误：{exc}')
+        return False
     if not m:
-        log('MAIL 跳过：没有可用的 mail.json')
+        log('MAIL 跳过：未配置有效邮件')
         return False
     msg = EmailMessage()
     msg['From'] = m['sender']
