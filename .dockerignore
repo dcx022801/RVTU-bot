@@ -1,3 +1,6 @@
+# Docker 构建上下文过滤文件
+# 说明：Docker 要求 .dockerignore 必须位于构建上下文根目录；本项目的构建上下文是仓库根，
+#       因此该文件保留在根目录，其余 Docker 专属文件都放在 docker/。
 # 配置与运行态不进镜像（运行时由挂载提供）
 config/
 state/
@@ -6,17 +9,25 @@ state/
 .env
 .env.*
 !.env.example
+docker/.env
+docker/.env.*
 *.log
 
-# 文档与仓库元数据不必进入构建上下文
+# Windows GUI 与开发文件不进镜像
+win/
+tests/
+.git/
 README.md
 README.local.md
-.git/
+
+# docker/ 下只保留构建所需文件
+docker/docker-compose.yml
+docker/build.sh
+docker/start.sh
+docker/stop.sh
+docker/README.md
 
 # Python 缓存
 **/__pycache__/
 **/*.pyc
 .pytest_cache/
-
-# 测试脚手架
-tests/

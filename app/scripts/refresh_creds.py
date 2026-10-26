@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""刷新考勤系统凭据（容器版）
+"""刷新考勤系统凭据（Docker / Windows 通用）
 
 背景：服务端会轮换 RSA 公钥。公钥一变，旧 token 会失效、旧 idCard 密文也登录不上
 （报「身份认证密钥失败，请刷新后重试！」）。
 
 配置：
-    /config/creds.json     user（身份证号；命令行不给参数时默认用它）
-    /defaults/api.json     base（接口地址）
-    /state/session.json    登录态（token / idCardEnc / publicKeyBase64，运行自动更新）
+    config/creds.json（Docker 内 /config/creds.json）     user（身份证号；命令行不给参数时默认用它）
+    defaults/api.json（Docker 内 /defaults/api.json）     base（接口地址）
+    state/session.json（Docker 内 /state/session.json）    登录态（token / idCardEnc / publicKeyBase64，运行自动更新）
 
 用法：
     python3 refresh_creds.py --check          # 只检查当前 token 是否还有效
@@ -17,11 +17,12 @@
 """
 import argparse, base64, json, os, secrets, sys, urllib.request, urllib.error
 
-from configutil import ConfigError, load_api, load_creds, require_text
+from configutil import (ConfigError, DEFAULT_CONFIG_DIR, DEFAULT_DEFAULTS_DIR,
+                        DEFAULT_STATE_DIR, load_api, load_creds, require_text)
 
-CONFIG_DIR = os.environ.get('CONFIG_DIR', '/config')
-DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', '/defaults')
-STATE_DIR = os.environ.get('STATE_DIR', '/state')
+CONFIG_DIR = os.environ.get('CONFIG_DIR', DEFAULT_CONFIG_DIR)
+DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', DEFAULT_DEFAULTS_DIR)
+STATE_DIR = os.environ.get('STATE_DIR', DEFAULT_STATE_DIR)
 
 CREDS = os.path.join(CONFIG_DIR, 'creds.json')
 APICFG = os.path.join(DEFAULTS_DIR, 'api.json')

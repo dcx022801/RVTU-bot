@@ -1,5 +1,5 @@
 #!/bin/sh
-# RVTU-bot 容器入口
+# RVTU-bot 容器入口（源码位于 docker/entrypoint.sh，镜像内复制到 /app/entrypoint.sh）
 # 1) root 启动时准备 /state 权限，把 /config 复制到 /state/config（配置模式），
 #    然后 su-exec 降权到 rvtu；实际业务进程不以 root 运行。
 # 2) .env 模式（CREDS_USER 去空白后非空）由 bootstrap.py 合成配置到 /state/config。

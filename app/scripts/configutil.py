@@ -6,8 +6,16 @@
 避免把模板值或错误配置当作真实参数发到学校接口。
 """
 import json
+import os
 import re
 import urllib.parse
+
+# 默认路径按仓库/容器布局推导：
+#   源码 app/scripts → 项目根；镜像 /app/scripts → /（即 /config /defaults /state）
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DEFAULT_CONFIG_DIR = os.path.join(REPO_ROOT, 'config')
+DEFAULT_DEFAULTS_DIR = os.path.join(REPO_ROOT, 'defaults')
+DEFAULT_STATE_DIR = os.path.join(REPO_ROOT, 'state')
 
 PLACEHOLDER_WORDS = {'todo', 'changeme', 'example', 'placeholder', 'xxx'}
 MAC_RE = re.compile(r'^(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$')

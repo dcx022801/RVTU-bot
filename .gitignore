@@ -14,5 +14,11 @@ state/*
 __pycache__/
 *.pyc
 
+# Windows GUI 虚拟环境与 PyInstaller 构建产物
+.venv/
+win/.venv/
+build/
+dist/
+
 # 测试输出
 tests/*.out

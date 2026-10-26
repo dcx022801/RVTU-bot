@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """RVTU-bot 内置调度器（替代宿主 cron）
 
-读取 /defaults/schedule.json，到点执行三个任务：
+读取 defaults/schedule.json（Docker 内 /defaults/schedule.json），到点执行三个任务：
     checkin  每日 21:00（随机延迟后执行 checkin.py）—— 宿舍考勤打卡
     happy    每日 19:00（随机延迟后执行 happy_checkin.py）—— 晚自习打卡
-    portal   每 interval_minutes 分钟执行 portal-auth.sh —— 校园网 Portal 认证
+    portal   每 interval_minutes 分钟执行 portal_auth.py —— 校园网 Portal 认证
 
 打卡前预检：每个打卡任务在触发点前 notify_before_min 分钟执行一次预检
 （即调用对应脚本的 --precheck 模式：查询今日状态后，仅在"待打卡/预检失败"时发邮件；
@@ -29,11 +29,12 @@ SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts')
 if SCRIPTS not in sys.path:
     sys.path.insert(0, SCRIPTS)
 
-from configutil import ConfigError, load_schedule
+from configutil import (ConfigError, DEFAULT_DEFAULTS_DIR, DEFAULT_STATE_DIR,
+                        load_schedule)
 from logutil import append_log
 
-DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', '/defaults')
-STATE_DIR = os.environ.get('STATE_DIR', '/state')
+DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', DEFAULT_DEFAULTS_DIR)
+STATE_DIR = os.environ.get('STATE_DIR', DEFAULT_STATE_DIR)
 SCHED = os.path.join(DEFAULTS_DIR, 'schedule.json')
 STATE_FILE = os.path.join(STATE_DIR, 'scheduler_state.json')
 LOG = os.path.join(STATE_DIR, 'logs', 'scheduler.log')
@@ -43,6 +44,15 @@ RETRY_CODES = (2, 3)      # 需要重试的退出码
 GRACE_MIN = 90            # 错过触发点超过这个分钟数就不补跑
 NOTIFY_WINDOW_MIN = 5     # 预检窗口收尾：距触发点不足 5 分钟就不再预检
 MAX_ATTEMPTS = 2          # 首次 + 一次重试
+PYTHON = sys.executable or 'python3'  # Docker 内为 /usr/local/bin/python3，Windows 为 python.exe
+FROZEN = bool(getattr(sys, 'frozen', False))
+
+
+def core_command(script: str, *args) -> list:
+    """源码模式直接执行脚本；PyInstaller exe 模式通过自身 --run-core 分发。"""
+    if FROZEN:
+        return [sys.executable, '--run-core', script, *args]
+    return [PYTHON, script, *args]
 
 
 def log(msg: str) -> None:
@@ -54,7 +64,10 @@ def log(msg: str) -> None:
 def spawn(name: str, argv: list) -> int:
     log(f"{name}: 执行 {' '.join(argv)}")
     try:
-        result = subprocess.run(argv, timeout=1800)
+        kwargs = {'timeout': 1800}
+        if os.name == 'nt':
+            kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run(argv, **kwargs)
         log(f"{name}: 退出码 {result.returncode}")
         return result.returncode
     except Exception as exc:
@@ -199,7 +212,7 @@ def run_task(name: str, argv: list, delay_max: int, retry_min: int,
 
 def send_precheck(name: str, script: str) -> None:
     """线程内执行打卡前预检：脚本查询今日状态后，仅在“待打卡/预检失败”时发邮件"""
-    spawn(f'{name}-precheck', ['python3', os.path.join(SCRIPTS, script), '--precheck'])
+    spawn(f'{name}-precheck', core_command(os.path.join(SCRIPTS, script), '--precheck'))
 
 
 def write_heartbeat() -> None:
@@ -226,7 +239,7 @@ def build_tasks(sched: dict) -> list:
                           retry=item['retry_after_min'],
                           notify=item['notify_before_min'],
                           precheck=precheck,
-                          argv=['python3', os.path.join(SCRIPTS, precheck)]))
+                          argv=core_command(os.path.join(SCRIPTS, precheck))))
     return tasks
 
 
@@ -251,6 +264,55 @@ def recover_running(store: StateStore, tasks: list, now: datetime.datetime) -> N
             log(f"{task['name']}: 上次执行未完成且已超出补跑窗口，标记失败")
 
 
+def acquire_instance_lock():
+    """同一 STATE_DIR 只允许一个调度器实例运行（Windows / Linux 通用）。"""
+    path = os.path.join(STATE_DIR, 'scheduler.lock')
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        handle = open(path, 'a+')
+    except Exception:
+        return 'noop'
+    try:
+        if os.name == 'nt':
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+    except Exception:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        return None
+
+
+def write_pid_file() -> None:
+    path = os.path.join(STATE_DIR, 'scheduler.pid')
+    try:
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write(str(os.getpid()))
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def remove_pid_file() -> None:
+    path = os.path.join(STATE_DIR, 'scheduler.pid')
+    try:
+        with open(path, encoding='utf-8') as handle:
+            if handle.read().strip() != str(os.getpid()):
+                return
+        os.remove(path)
+    except Exception:
+        pass
+
+
 def main() -> int:
     try:
         sched = load_schedule(SCHED, required=True)
@@ -272,86 +334,100 @@ def main() -> int:
     uid = os.getuid() if hasattr(os, 'getuid') else 'n/a'
     log(f"调度器启动完成（uid={uid}）")
 
-    store = StateStore(STATE_FILE)
-    now = datetime.datetime.now()
-    store.load(now.date().isoformat())
-    recover_running(store, daily, now)
+    lock = acquire_instance_lock()
+    if lock is None:
+        log('另一个调度器实例正在运行，退出')
+        return 1
+    write_pid_file()
 
-    last_portal = 0.0
-    max_loops = int(os.environ.get('RVTU_SCHEDULER_MAX_LOOPS', '0') or 0)
-    loops = 0
-
-    while True:
+    try:
+        store = StateStore(STATE_FILE)
         now = datetime.datetime.now()
-        store.ensure_date(now.date().isoformat())
-        write_heartbeat()
+        store.load(now.date().isoformat())
+        recover_running(store, daily, now)
 
-        for task in daily:
-            target = target_of(now, task)
+        last_portal = 0.0
+        max_loops = int(os.environ.get('RVTU_SCHEDULER_MAX_LOOPS', '0') or 0)
+        loops = 0
 
-            # ---- 打卡前预检 ----
-            notify = task['notify']
-            if notify > 0 and not store.precheck_done(task['name']):
-                ntarget = target - datetime.timedelta(minutes=notify)
-                deadline = target - datetime.timedelta(minutes=NOTIFY_WINDOW_MIN)
-                if now >= ntarget:
-                    store.mark_precheck(task['name'])
-                    if now <= deadline:
-                        threading.Thread(target=send_precheck,
-                                         args=(task['name'], task['precheck']),
-                                         daemon=True).start()
-                    else:
-                        log(f"{task['name']}: 预检窗口已错过（距触发不足 "
-                            f"{NOTIFY_WINDOW_MIN} 分钟），跳过")
+        while True:
+            now = datetime.datetime.now()
+            store.ensure_date(now.date().isoformat())
+            write_heartbeat()
 
-            # ---- 打卡任务 ----
-            current = store.task(task['name'])
-            status = current.get('status') or ''
-            if status in ('done', 'failed', 'skipped', 'running'):
-                continue
-            if status == 'retry_pending':
-                due = float(current.get('next_retry_at') or 0)
-                if time.time() < due:
+            for task in daily:
+                target = target_of(now, task)
+
+                # ---- 打卡前预检 ----
+                notify = task['notify']
+                if notify > 0 and not store.precheck_done(task['name']):
+                    ntarget = target - datetime.timedelta(minutes=notify)
+                    deadline = target - datetime.timedelta(minutes=NOTIFY_WINDOW_MIN)
+                    if now >= ntarget:
+                        store.mark_precheck(task['name'])
+                        if now <= deadline:
+                            threading.Thread(target=send_precheck,
+                                             args=(task['name'], task['precheck']),
+                                             daemon=True).start()
+                        else:
+                            log(f"{task['name']}: 预检窗口已错过（距触发不足 "
+                                f"{NOTIFY_WINDOW_MIN} 分钟），跳过")
+
+                # ---- 打卡任务 ----
+                current = store.task(task['name'])
+                status = current.get('status') or ''
+                if status in ('done', 'failed', 'skipped', 'running'):
                     continue
-                attempts = int(current.get('attempts') or 1)
-                if now > target + datetime.timedelta(minutes=GRACE_MIN) or attempts >= MAX_ATTEMPTS:
-                    store.set_task(task['name'], status='failed')
-                    log(f"{task['name']}: 重试已超出补跑窗口或次数，标记失败")
+                if status == 'retry_pending':
+                    due = float(current.get('next_retry_at') or 0)
+                    if time.time() < due:
+                        continue
+                    attempts = int(current.get('attempts') or 1)
+                    if now > target + datetime.timedelta(minutes=GRACE_MIN) or attempts >= MAX_ATTEMPTS:
+                        store.set_task(task['name'], status='failed')
+                        log(f"{task['name']}: 重试已超出补跑窗口或次数，标记失败")
+                        continue
+                    task_date = store.start_task(task['name'], attempts + 1)
+                    log(f"{task['name']}: 开始第 {attempts + 1} 次尝试")
+                    threading.Thread(target=run_task,
+                                     args=(task['name'], task['argv'], 0, task['retry'],
+                                           store, task_date),
+                                     daemon=True).start()
                     continue
-                task_date = store.start_task(task['name'], attempts + 1)
-                log(f"{task['name']}: 开始第 {attempts + 1} 次尝试")
+
+                if now < target:
+                    continue
+                if now > target + datetime.timedelta(minutes=GRACE_MIN):
+                    store.set_task(task['name'], status='skipped')
+                    log(f"{task['name']}: 今日触发点 {task['hour']:02d}:{task['minute']:02d} "
+                        f"已错过超过 {GRACE_MIN} 分钟，跳过")
+                    continue
+                task_date = store.start_task(task['name'], 1)
                 threading.Thread(target=run_task,
-                                 args=(task['name'], task['argv'], 0, task['retry'],
-                                       store, task_date),
+                                 args=(task['name'], task['argv'], task['delay'],
+                                       task['retry'], store, task_date),
                                  daemon=True).start()
-                continue
 
-            if now < target:
-                continue
-            if now > target + datetime.timedelta(minutes=GRACE_MIN):
-                store.set_task(task['name'], status='skipped')
-                log(f"{task['name']}: 今日触发点 {task['hour']:02d}:{task['minute']:02d} "
-                    f"已错过超过 {GRACE_MIN} 分钟，跳过")
-                continue
-            task_date = store.start_task(task['name'], 1)
-            threading.Thread(target=run_task,
-                             args=(task['name'], task['argv'], task['delay'],
-                                   task['retry'], store, task_date),
-                             daemon=True).start()
+            if time.time() - last_portal >= portal_interval * 60:
+                last_portal = time.time()
+                threading.Thread(target=run_task,
+                                 args=('portal', core_command(os.path.join(SCRIPTS, 'portal_auth.py')),
+                                       0, 0, None),
+                                 daemon=True).start()
 
-        if time.time() - last_portal >= portal_interval * 60:
-            last_portal = time.time()
-            threading.Thread(target=run_task,
-                             args=('portal', ['sh', os.path.join(SCRIPTS, 'portal-auth.sh')],
-                                   0, 0, None),
-                             daemon=True).start()
+            loops += 1
+            if max_loops and loops >= max_loops:
+                break
+            time.sleep(20)
 
-        loops += 1
-        if max_loops and loops >= max_loops:
-            break
-        time.sleep(20)
-
-    return 0
+        return 0
+    finally:
+        remove_pid_file()
+        if lock != 'noop':
+            try:
+                lock.close()
+            except Exception:
+                pass
 
 
 if __name__ == '__main__':

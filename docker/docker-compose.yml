@@ -1,8 +1,13 @@
+name: rvtu-bot
+
 services:
   rvtu-bot:
-    # 生产建议用 digest 固定：在 .env 写 RVTU_IMAGE=ghcr.io/...@sha256:<digest>
+    # 生产建议用 digest 固定：在 docker/.env 写 RVTU_IMAGE=ghcr.io/...@sha256:<digest>
     image: ${RVTU_IMAGE:-ghcr.io/dcx022801/rvtu-bot:latest}
-    build: .                                   # 也可本地构建（up -d --build）
+    # 构建上下文是仓库根目录（本文件位于 docker/）
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: rvtu-bot
     # host 网络：直读宿主机网口/网关信息，Portal 认证才能探测真实接口
     network_mode: host
@@ -14,14 +19,14 @@ services:
       CONFIG_DIR: /state/config
       SOURCE_CONFIG_DIR: /config
     env_file:
-      # .env 注入（可选）：存在 .env 且填了 CREDS_USER 时启用，全部配置以 .env 为准
+      # .env 注入（可选）：存在 docker/.env 且填了 CREDS_USER 时启用，全部配置以 .env 为准
       - path: .env
         required: false
     volumes:
-      # 配置目录：默认工程内 ./config；可用环境变量 CONFIG_DIR 指向别处
-      - ${CONFIG_DIR:-./config}:/config:ro
-      - ./defaults:/defaults:ro   # 程序参数（调度/探测点/接口地址，可改）
-      - ./state:/state            # 运行态（登录态/日志/调度状态，自动生成）
+      # 配置目录：默认仓库根目录 ./config；可用环境变量 CONFIG_DIR 指向别处
+      - ${CONFIG_DIR:-../config}:/config:ro
+      - ../defaults:/defaults:ro   # 程序参数（调度/探测点/接口地址，可改）
+      - ../state:/state            # 运行态（登录态/日志/调度状态，自动生成）
     read_only: true
     tmpfs:
       - /tmp:size=16m

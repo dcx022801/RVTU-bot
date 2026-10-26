@@ -6,8 +6,8 @@
 提醒的作用：如果需要阻止本次打卡（例如人不在学校），在收到提醒后手动关闭容器。
 
 配置：
-    /config/mail.json    发信配置（与打卡共用）
-    $STATE_DIR/logs/notify.log
+    config/mail.json（Docker 内 /config/mail.json）  发信配置（与打卡共用）
+    state/logs/notify.log（Docker 内 /state/logs/notify.log）
 
 用法:
     python3 notify.py "标题" "正文"           # 发送提醒
@@ -18,11 +18,11 @@
 import os, sys, smtplib, ssl, datetime
 from email.message import EmailMessage
 
-from configutil import ConfigError, load_mail
+from configutil import ConfigError, DEFAULT_CONFIG_DIR, DEFAULT_STATE_DIR, load_mail
 from logutil import append_log
 
-CONFIG_DIR = os.environ.get('CONFIG_DIR', '/config')
-STATE_DIR = os.environ.get('STATE_DIR', '/state')
+CONFIG_DIR = os.environ.get('CONFIG_DIR', DEFAULT_CONFIG_DIR)
+STATE_DIR = os.environ.get('STATE_DIR', DEFAULT_STATE_DIR)
 MAILCFG = os.path.join(CONFIG_DIR, 'mail.json')
 LOGDIR = os.path.join(STATE_DIR, 'logs')
 LOG = os.path.join(LOGDIR, 'notify.log')

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""日职 宿舍考勤 自动打卡 + 邮件通知（RVTU-bot 容器版，rzptxsgl.rzpt.cn / xsxxgl-server）
+"""日职 宿舍考勤 自动打卡 + 邮件通知（RVTU-bot，Docker / Windows 通用）
 
 说明：环境预检已移除 —— 是否打卡由手动开关容器决定（人在学校时开着容器）。
 
 配置（环境变量可覆盖路径）：
-    CONFIG_DIR   默认 /config    —— 手动填写的参数
+    CONFIG_DIR   默认 config/（Docker 内 /config）    —— 手动填写的参数
         creds.json     user（必填：身份证号）/ pass（统一密码）
         mail.json      发信配置
-    DEFAULTS_DIR 默认 /defaults  —— 程序参数
+    DEFAULTS_DIR 默认 defaults/（Docker 内 /defaults）  —— 程序参数
         api.json       base / module / ua_checkin
-    STATE_DIR    默认 /state     —— 运行态（自动生成）
+    STATE_DIR    默认 state/（Docker 内 /state）       —— 运行态（自动生成）
         session.json   token / idCardEnc / publicKeyBase64
         logs/checkin.log
 
@@ -33,12 +33,14 @@
 import json, os, sys, smtplib, ssl, urllib.request, urllib.error, datetime
 from email.message import EmailMessage
 
-from configutil import ConfigError, load_api, load_creds, load_mail, load_schedule
+from configutil import (ConfigError, DEFAULT_CONFIG_DIR, DEFAULT_DEFAULTS_DIR,
+                        DEFAULT_STATE_DIR, load_api, load_creds, load_mail,
+                        load_schedule)
 from logutil import append_log
 
-CONFIG_DIR = os.environ.get('CONFIG_DIR', '/config')
-DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', '/defaults')
-STATE_DIR = os.environ.get('STATE_DIR', '/state')
+CONFIG_DIR = os.environ.get('CONFIG_DIR', DEFAULT_CONFIG_DIR)
+DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', DEFAULT_DEFAULTS_DIR)
+STATE_DIR = os.environ.get('STATE_DIR', DEFAULT_STATE_DIR)
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CREDS = os.path.join(CONFIG_DIR, 'creds.json')
@@ -49,7 +51,7 @@ SESSION = os.path.join(STATE_DIR, 'session.json')
 LOGDIR = os.path.join(STATE_DIR, 'logs')
 LOG = os.path.join(LOGDIR, 'checkin.log')
 
-# 以下为兜底默认，正常由 /defaults/api.json 提供
+# 以下为兜底默认，正常由 defaults/api.json 提供
 DEFAULT_BASE = 'https://rzptxsgl.rzpt.cn/xsxxgl-server'
 DEFAULT_UA = ('Mozilla/5.0 (Linux; Android 16; 25079RPDCC Build/BP2A.250605.031.A3; wv) '
               'AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.192 Safari/537.36')
@@ -75,7 +77,7 @@ def load_json(path: str):
 
 
 def save_session(s: dict) -> None:
-    """把登录态写回 /state/session.json（token / idCardEnc / publicKeyBase64）"""
+    """把登录态写回 state/session.json（token / idCardEnc / publicKeyBase64）"""
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(SESSION, 'w', encoding='utf-8') as f:
         json.dump(s, f, ensure_ascii=False, indent=1)

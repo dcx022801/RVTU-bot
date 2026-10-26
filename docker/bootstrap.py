@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 """把 .env 注入的环境变量合成为 config/*.json（仅 .env 模式启用时由 entrypoint.sh 调用）
 
-变量命名对照（详见仓库根目录 .env.example）：
+源码位于 docker/bootstrap.py；Dockerfile 会复制到镜像内 /app/bootstrap.py，
+因此配置路径与容器布局保持兼容。
+
+变量命名对照（详见 docker/.env.example）：
     CREDS_USER / CREDS_PASS                 登录凭据（身份证号 / 统一密码）
     MAIL_HOST / MAIL_PORT / MAIL_USER /     邮件通知
     MAIL_PASSWORD / MAIL_SENDER / MAIL_TO
@@ -18,14 +21,23 @@ import os
 import re
 import sys
 
-SCRIPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts')
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_CANDIDATES = (
+    os.path.join(BASE_DIR, 'scripts'),                  # 镜像内 /app/bootstrap.py
+    os.path.join(os.path.dirname(BASE_DIR), 'app', 'scripts'),  # 源码 docker/bootstrap.py
+)
+for _candidate in SCRIPT_CANDIDATES:
+    if os.path.isdir(_candidate):
+        if _candidate not in sys.path:
+            sys.path.insert(0, _candidate)
+        break
 
 from configutil import (ConfigError, as_bool, is_placeholder, require_float,
                         require_int, require_mac, require_text)
 
-STATE_DIR = os.environ.get('STATE_DIR', '/state')
+# 容器内 BASE_DIR=/app → 仓库根=/；源码内 docker/ → 仓库根
+REPO_ROOT = os.path.dirname(BASE_DIR)
+STATE_DIR = os.environ.get('STATE_DIR', os.path.join(REPO_ROOT, 'state'))
 OUT_DIR = os.environ.get('ENV_CONFIG_DIR') or os.path.join(STATE_DIR, 'config')
 
 

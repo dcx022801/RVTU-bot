@@ -1,4 +1,6 @@
 # RVTU-bot —— 日职打卡 + 校园网 Portal 认证（单容器，host 网络）
+# 构建上下文为仓库根目录：
+#   docker build -f docker/Dockerfile -t rvtu-bot:latest .
 FROM rom3eur8hklqtwq0fa.xuanyuan.run/library/alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd
 
 # 关联 GitHub 仓库（ghcr 包页面显示与权限继承）
@@ -28,6 +30,11 @@ WORKDIR /app
 # 配置三层：/config 用户参数（挂载后复制到 /state/config）、/defaults 程序参数、/state 运行态
 COPY app/ /app/
 COPY defaults/ /defaults/
+
+# Docker 专属入口与 .env 注入脚本放在 docker/，镜像内仍使用旧路径 /app/entrypoint.sh、/app/bootstrap.py
+COPY docker/entrypoint.sh /app/entrypoint.sh
+COPY docker/bootstrap.py /app/bootstrap.py
+COPY docker/portal-auth.sh /app/scripts/portal-auth.sh
 
 # 入口以 root 启动，修正挂载目录权限后通过 su-exec 降权到 rvtu；
 # 实际业务进程（scheduler/打卡/Portal）以 UID 100（rvtu）运行。

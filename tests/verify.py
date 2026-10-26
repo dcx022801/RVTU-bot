@@ -25,6 +25,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / 'app' / 'scripts'
 PY = sys.executable
 sys.path.insert(0, str(REPO / 'app'))
+sys.path.insert(0, str(REPO / 'docker'))
 sys.path.insert(0, str(SCRIPTS))
 
 RESULTS = []
@@ -199,6 +200,13 @@ threading.Thread(target=SERVER.serve_forever, daemon=True).start()
 # ---------------- tests ----------------
 def test_static():
     check('A01 Python 语法', compileall.compile_dir(str(REPO / 'app'), quiet=1))
+    try:
+        compile((REPO / 'win' / 'gui.py').read_text(encoding='utf-8'),
+                str(REPO / 'win' / 'gui.py'), 'exec')
+        gui_syntax = True
+    except SyntaxError:
+        gui_syntax = False
+    check('A01 Windows GUI 语法', gui_syntax)
     for path in list((REPO / 'config').glob('*.json')) + list((REPO / 'defaults').glob('*.json')):
         try:
             json.loads(path.read_text(encoding='utf-8'))
@@ -206,10 +214,17 @@ def test_static():
         except Exception:
             ok = False
         check(f'A03 JSON {path.name}', ok)
-    sh = subprocess.run(['sh', '-n', str(REPO / 'app' / 'entrypoint.sh')], capture_output=True)
+    check('A04 目录分层',
+          (REPO / 'docker' / 'Dockerfile').exists()
+          and (REPO / 'docker' / 'docker-compose.yml').exists()
+          and (REPO / 'win' / 'gui.py').exists())
+    sh = subprocess.run(['sh', '-n', str(REPO / 'docker' / 'entrypoint.sh')], capture_output=True)
     check('A02 entrypoint.sh 语法', sh.returncode == 0)
-    sh = subprocess.run(['sh', '-n', str(SCRIPTS / 'portal-auth.sh')], capture_output=True)
+    sh = subprocess.run(['sh', '-n', str(REPO / 'docker' / 'portal-auth.sh')], capture_output=True)
     check('A02 portal-auth.sh 语法', sh.returncode == 0)
+    for name in ('build.sh', 'start.sh', 'stop.sh'):
+        sh = subprocess.run(['sh', '-n', str(REPO / 'docker' / name)], capture_output=True)
+        check(f'A02 docker/{name} 语法', sh.returncode == 0)
 
 
 def test_config():
@@ -521,20 +536,25 @@ def test_bootstrap_refresh():
         'ENV_CONFIG_DIR': str(base / 'state' / 'config'),
         'PYTHONIOENCODING': 'utf-8',
     })
-    proc = subprocess.run([PY, str(REPO / 'app' / 'bootstrap.py')], env=env,
+    proc = subprocess.run([PY, str(REPO / 'docker' / 'bootstrap.py')], env=env,
                           capture_output=True, text=True, encoding='utf-8', timeout=20)
     check('D08 bootstrap 生成', proc.returncode == 0 and
           (base / 'state' / 'config' / 'creds.json').exists(), f'rc={proc.returncode}')
     env2 = env.copy(); env2['CREDS_USER'] = '   '
-    proc = subprocess.run([PY, str(REPO / 'app' / 'bootstrap.py')], env=env2,
+    proc = subprocess.run([PY, str(REPO / 'docker' / 'bootstrap.py')], env=env2,
                           capture_output=True, text=True, encoding='utf-8', timeout=20)
     check('D10 空白 CREDS_USER 拒绝', proc.returncode == 2, f'rc={proc.returncode}')
     env4 = env.copy(); env4['MAIL_HOST'] = 'smtp.163.com'; env4['MAIL_PORT'] = '465'
-    proc = subprocess.run([PY, str(REPO / 'app' / 'bootstrap.py')], env=env4,
+    proc = subprocess.run([PY, str(REPO / 'docker' / 'bootstrap.py')], env=env4,
                           capture_output=True, text=True, encoding='utf-8', timeout=20)
     mail = json.loads((base / 'state' / 'config' / 'mail.json').read_text(encoding='utf-8'))
     check('D08 默认邮件主机不误启用', proc.returncode == 0 and mail == {},
           f'rc={proc.returncode},mail={mail}')
+    import configutil
+    check('A05 默认路径与仓库一致',
+          pathlib.Path(configutil.DEFAULT_CONFIG_DIR) == REPO / 'config'
+          and pathlib.Path(configutil.DEFAULT_DEFAULTS_DIR) == REPO / 'defaults'
+          and pathlib.Path(configutil.DEFAULT_STATE_DIR) == REPO / 'state')
 
     case = make_case()
     root, config, defaults, state = case

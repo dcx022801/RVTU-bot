@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""校园网 Portal 自动认证（RVTU-bot 容器版）
+"""校园网 Portal 自动认证（Docker / Windows 通用版）
 
 安全边界：
     - 只向 portal.allowedHosts 白名单内的 host 提交账号密码，默认 fail-closed；
     - 只允许 http/https，拒绝带 userinfo 的跳转；
     - 认证成功后重新探测 204，避免把认证接口响应误判为网络已恢复；
-    - 账号密码不进入命令行参数，避免容器内 ps 泄露。
+    - 账号密码不进入命令行参数，避免进程列表泄露。
 
 用法：
     python3 portal_auth.py [iface ...]
-    sh portal-auth.sh [iface ...]        # 兼容旧入口
+    sh portal-auth.sh [iface ...]        # Docker 兼容入口（源码在 docker/portal-auth.sh）
+
+Windows 说明：
+    自动枚举本机 IPv4 地址并逐个探测；建议在 portal.json 填 umac，
+    否则回退到 getmac / 主网卡 MAC，可能与实际联网网卡不一致。
 
 配置：
-    /config/creds.json    user / pass
-    /config/portal.json   umac / uplinkMac / allowedHosts / allowedSchemes /
+    config/creds.json（Docker 内 /config/creds.json）    user / pass
+    config/portal.json（Docker 内 /config/portal.json）   umac / uplinkMac / allowedHosts / allowedSchemes /
                           allowAny / macFormat
-    /defaults/api.json    probe_url
+    defaults/api.json（Docker 内 /defaults/api.json）    probe_url
 """
 import http.client
 import json
@@ -27,16 +31,19 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import uuid
 
-from configutil import (ConfigError, MAC_RE, load_api, load_creds, load_portal,
-                        mac_style, normalize_mac)
+from configutil import (ConfigError, DEFAULT_CONFIG_DIR, DEFAULT_DEFAULTS_DIR,
+                        DEFAULT_STATE_DIR, MAC_RE, load_api, load_creds,
+                        load_portal, mac_style, normalize_mac)
 from logutil import log as log_line
 
-CONFIG_DIR = os.environ.get('CONFIG_DIR', '/config')
-DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', '/defaults')
-STATE_DIR = os.environ.get('STATE_DIR', '/state')
+CONFIG_DIR = os.environ.get('CONFIG_DIR', DEFAULT_CONFIG_DIR)
+DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', DEFAULT_DEFAULTS_DIR)
+STATE_DIR = os.environ.get('STATE_DIR', DEFAULT_STATE_DIR)
 LOG = os.path.join(STATE_DIR, 'logs', 'portal-auth.log')
 UA = 'RVTU-bot/1.0'
+IS_WINDOWS = os.name == 'nt'
 
 
 class IPv4HTTPConnection(http.client.HTTPConnection):
@@ -78,19 +85,78 @@ def run_ip(args):
         return ''
 
 
+def _decode_output(raw: bytes) -> str:
+    for encoding in ('oem', 'mbcs', 'utf-8'):
+        try:
+            return raw.decode(encoding)
+        except Exception:
+            continue
+    return raw.decode('latin-1', 'ignore')
+
+
+def _win_ipv4_list():
+    """枚举 Windows 本机 IPv4（排除回环/APIPA），返回 IP 列表作为接口标识。"""
+    addresses = []
+    try:
+        result = subprocess.run(['ipconfig'], capture_output=True, timeout=8)
+        output = _decode_output(result.stdout or b'')
+    except Exception:
+        output = ''
+    for match in re.finditer(r'IPv4[^:]*:\s*(\d+\.\d+\.\d+\.\d+)', output, re.I):
+        address = match.group(1)
+        if address.startswith(('127.', '169.254.')) or address in addresses:
+            continue
+        addresses.append(address)
+    if not addresses:
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                address = info[4][0]
+                if address.startswith(('127.', '169.254.')) or address in addresses:
+                    continue
+                addresses.append(address)
+        except Exception:
+            pass
+    return addresses
+
+
+def _win_mac():
+    """返回本机 MAC（连字符格式）；多网卡时优先 getmac 第一条。"""
+    try:
+        result = subprocess.run(['getmac', '/fo', 'csv', '/nh'], capture_output=True, timeout=8)
+        output = _decode_output(result.stdout or b'')
+        match = re.search(r'([0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){5})', output)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    try:
+        node = uuid.getnode()
+        if (node >> 40) & 0x01:
+            return ''
+        return '-'.join(f'{(node >> shift) & 0xff:02x}' for shift in range(40, -1, -8))
+    except Exception:
+        return ''
+
+
 def if_ip(iface: str) -> str:
+    if IS_WINDOWS:
+        return iface if re.match(r'^\d+\.\d+\.\d+\.\d+$', iface or '') else ''
     output = run_ip(['-4', 'addr', 'show', 'dev', iface])
     match = re.search(r'\binet\s+(\d+\.\d+\.\d+\.\d+)/', output)
     return match.group(1) if match else ''
 
 
 def if_mac(iface: str) -> str:
+    if IS_WINDOWS:
+        return _win_mac()
     output = run_ip(['link', 'show', 'dev', iface])
     match = re.search(r'link/ether\s+([0-9a-fA-F:]{17})', output)
     return match.group(1).replace(':', '-') if match else ''
 
 
 def default_interfaces():
+    if IS_WINDOWS:
+        return _win_ipv4_list()
     interfaces = set()
     for line in run_ip(['route', 'show', 'default']).splitlines():
         match = re.search(r'\bdev\s+(\S+)', line)
@@ -199,7 +265,8 @@ def login(iface: str, source_ip: str, location: str, probe_url: str,
         acip = query_value(query, 'ac-ip')
         ssid = query_value(query, 'ssid')
         push_page = query_value(query, 'pushPageId')
-        umac, uplink = mac_for_login(portal, location_mac, if_mac(iface))
+        fallback_mac = '' if (portal['umac'] or location_mac) else if_mac(iface)
+        umac, uplink = mac_for_login(portal, location_mac, fallback_mac)
         if not umac:
             log(f'WARN {iface}: 无可用认证 MAC，仍按空值提交（可能失败）')
 
@@ -282,13 +349,24 @@ def acquire_lock():
         log(f'portal: 无法创建锁文件（{type(exc).__name__}），继续执行')
         return 'noop'
     try:
-        import fcntl
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if IS_WINDOWS:
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         return handle
     except BlockingIOError:
         handle.close()
         log('portal: 另一个实例正在执行，跳过本轮')
         return None
+    except OSError:
+        if IS_WINDOWS:
+            handle.close()
+            log('portal: 另一个实例正在执行，跳过本轮')
+            return None
+        return handle
     except Exception:
         return handle
 

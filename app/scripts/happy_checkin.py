@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""乐享晚自习 自动打卡（容器版，rzptxsgl.rzpt.cn / xsxxgl-server / apattendance）
+"""乐享晚自习 自动打卡（RVTU-bot，Docker / Windows 通用）
 
 配置分三层（环境变量可覆盖路径）：
-    CONFIG_DIR   默认 /config    —— 手动填写的参数
+    CONFIG_DIR   默认 config/（Docker 内 /config）    —— 手动填写的参数
         creds.json     user（必填：身份证号）/ pass（统一密码）
         macs.json      macs[]（必填：MAC 候选池，随机顺序逐个尝试）
         location.json  latitude / longitude / locationInfo（必填：定位通道备用）
         mail.json      发信配置
-    DEFAULTS_DIR 默认 /defaults  —— 程序参数
+    DEFAULTS_DIR 默认 defaults/（Docker 内 /defaults）  —— 程序参数
         api.json       base / module / ua_happy
-    STATE_DIR    默认 /state     —— 运行态（自动生成）
+    STATE_DIR    默认 state/（Docker 内 /state）       —— 运行态（自动生成）
         session.json       token / idCardEnc / publicKeyBase64
         logs/happy_checkin.log
 
@@ -43,13 +43,14 @@ import json, os, sys, time, random, datetime, smtplib, ssl
 import urllib.request, urllib.error
 from email.message import EmailMessage
 
-from configutil import (ConfigError, load_api, load_creds, load_location,
+from configutil import (ConfigError, DEFAULT_CONFIG_DIR, DEFAULT_DEFAULTS_DIR,
+                        DEFAULT_STATE_DIR, load_api, load_creds, load_location,
                         load_macs, load_mail, load_schedule, optional_bool)
 from logutil import append_log
 
-CONFIG_DIR = os.environ.get('CONFIG_DIR', '/config')
-DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', '/defaults')
-STATE_DIR = os.environ.get('STATE_DIR', '/state')
+CONFIG_DIR = os.environ.get('CONFIG_DIR', DEFAULT_CONFIG_DIR)
+DEFAULTS_DIR = os.environ.get('DEFAULTS_DIR', DEFAULT_DEFAULTS_DIR)
+STATE_DIR = os.environ.get('STATE_DIR', DEFAULT_STATE_DIR)
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CREDS = os.path.join(CONFIG_DIR, 'creds.json')
@@ -62,7 +63,7 @@ SESSION = os.path.join(STATE_DIR, 'session.json')
 LOGDIR = os.path.join(STATE_DIR, 'logs')
 LOG = os.path.join(LOGDIR, 'happy_checkin.log')
 
-# 以下为兜底默认，正常由 /defaults/api.json 提供
+# 以下为兜底默认，正常由 defaults/api.json 提供
 DEFAULT_BASE = 'https://rzptxsgl.rzpt.cn/xsxxgl-server'
 DEFAULT_UA = ('Mozilla/5.0 (Linux; Android 16; PLK110 Build/BP2A.250605.015; wv) '
               'AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/154.0.8037.106 Mobile Safari/537.36')
@@ -90,7 +91,7 @@ def load_json(path: str):
 
 
 def save_session(s: dict) -> None:
-    """把登录态写回 /state/session.json"""
+    """把登录态写回 state/session.json"""
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(SESSION, 'w', encoding='utf-8') as f:
         json.dump(s, f, ensure_ascii=False, indent=1)
