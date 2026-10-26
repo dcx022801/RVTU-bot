@@ -1,5 +1,7 @@
 # 本地配置注入（含凭据，绝不提交）
 .env
+.env.*
+!.env.example
 
 # 本地详细手册（仅本地，不推送）
 README.local.md
