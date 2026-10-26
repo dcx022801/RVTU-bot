@@ -26,8 +26,7 @@ docker logs rvtu-bot | grep -A5 'Web 管理员'
 
 首次启动会在日志中打印一次性管理员账号，然后访问 `http://<服务器IP>:11451` 登录，添加用户并启用。
 
-> 镜像托管在私有 ghcr 仓库，拉取前需登录一次：
-> `echo <GitHub Token> | docker login ghcr.io -u dcx022801 --password-stdin`
+> 镜像：`ghcr.io/dcx022801/rvtu-bot:latest`。如果拉取提示未授权，请在 GitHub 包设置中确认 `rvtu-bot` 可见性为 Public。
 
 ## Windows GUI
 
