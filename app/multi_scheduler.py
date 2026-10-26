@@ -351,6 +351,15 @@ def enabled_profiles(profiles_list: list) -> list:
     return [p for p in profiles_list if p['enabled'] and not p['errors']]
 
 
+def task_enabled(profile: dict, task: str) -> bool:
+    return bool((profile.get('tasks') or {}).get(task, True))
+
+
+def task_profiles(profiles_list: list, task: str) -> list:
+    return [p for p in enabled_profiles(profiles_list)
+            if task_enabled(p, task)]
+
+
 def config_errors(profiles_list: list) -> dict:
     return {p['slug']: p['errors'] for p in profiles_list
             if p['enabled'] and p['errors']}
@@ -365,7 +374,7 @@ def run_precheck(task: dict, order: list, by_slug: dict, stop_event) -> None:
         if stop_event and stop_event.is_set():
             return
         profile = by_slug.get(slug)
-        if not profile or not profile['enabled'] or profile['errors']:
+        if not profile or not profile['enabled'] or profile['errors']                 or not task_enabled(profile, task['name']):
             continue
         run_script(profile, f'{task["name"]}-precheck', task['script'],
                    '--precheck', timeout=900)
@@ -388,10 +397,10 @@ def launch_sequence(task: dict, order: list, by_slug: dict,
         if stop_event and stop_event.is_set():
             return
         profile = by_slug.get(slug)
-        if not profile or not profile['enabled'] or profile['errors']:
+        if not profile or not profile['enabled'] or profile['errors']                 or not task_enabled(profile, task['name']):
             store.set_task(slug, task['name'], status='skipped',
                            rc=None, next_retry_at=0)
-            log(f'{slug}/{task["name"]}: 用户已禁用或配置无效，跳过')
+            log(f'{slug}/{task["name"]}: 用户已禁用、任务已关闭或配置无效，跳过')
             continue
         store.start_task(slug, task['name'], 1)
         threading.Thread(target=run_task,
@@ -412,7 +421,7 @@ def portal_sequence(order: list, by_slug: dict, gaps: tuple,
         if stop_event and stop_event.is_set():
             return
         profile = by_slug.get(slug)
-        if profile and profile['enabled'] and not profile['errors']:
+        if profile and profile['enabled'] and not profile['errors']                 and task_enabled(profile, 'portal'):
             threading.Thread(target=run_portal, args=(profile,),
                              daemon=True).start()
         if index < len(order) - 1:
@@ -494,6 +503,8 @@ def main(stop_event=None) -> int:
 
             for task in daily:
                 target = target_of(now, task)
+                task_slugs = [p['slug'] for p in
+                              task_profiles(profiles_list, task['name'])]
 
                 if task['notify'] > 0 and not store.precheck_done(task['name']):
                     ntarget = target - datetime.timedelta(minutes=task['notify'])
@@ -501,7 +512,7 @@ def main(stop_event=None) -> int:
                     if now >= ntarget:
                         store.mark_precheck(task['name'])
                         if now <= deadline:
-                            order = random_order(slugs)
+                            order = random_order(task_slugs)
                             store.set_order(task['name'], order)
                             log(f'{task["name"]}: 预检决定用户顺序 '
                                 f'{" -> ".join(order) if order else "（无用户）"}')
@@ -516,23 +527,23 @@ def main(stop_event=None) -> int:
                     if now < target:
                         continue
                     if now > target + datetime.timedelta(minutes=GRACE_MIN):
-                        for slug in slugs:
+                        for slug in task_slugs:
                             store.set_task(slug, task['name'], status='skipped',
                                            rc=None, next_retry_at=0)
                         store.mark_launched(task['name'])
                         log(f'{task["name"]}: 已错过超过 {GRACE_MIN} 分钟，今日跳过')
                         continue
                     order = store.order(task['name'])
-                    order = [s for s in order if s in slugs]
-                    for slug in slugs:
+                    order = [s for s in order if s in task_slugs]
+                    for slug in task_slugs:
                         if slug not in order:
                             order.append(slug)
                     if not order:
-                        order = random_order(slugs)
+                        order = random_order(task_slugs)
                     if not order:
                         if task['name'] not in waiting:
                             waiting.add(task['name'])
-                            log(f'{task["name"]}: 当前没有启用且配置有效的用户，等待配置')
+                            log(f'{task["name"]}: 当前没有启用该任务且配置有效的用户，等待配置')
                         continue
                     waiting.discard(task['name'])
                     store.set_order(task['name'], order)
@@ -546,7 +557,7 @@ def main(stop_event=None) -> int:
                         args=(task, order, by_slug, store, task_date, gaps, stop_event),
                         daemon=True).start()
 
-                for slug in slugs:
+                for slug in task_slugs:
                     current = store.task(slug, task['name'])
                     if current.get('status') != 'retry_pending':
                         continue
@@ -560,7 +571,7 @@ def main(stop_event=None) -> int:
                                        next_retry_at=0)
                         continue
                     profile = by_slug.get(slug)
-                    if not profile or not profile['enabled'] or profile['errors']:
+                    if not profile or not profile['enabled'] or profile['errors']                             or not task_enabled(profile, task['name']):
                         store.set_task(slug, task['name'], status='failed')
                         continue
                     store.start_task(slug, task['name'], attempts + 1)
@@ -573,7 +584,9 @@ def main(stop_event=None) -> int:
 
             if time.time() - last_portal >= portal_interval * 60:
                 last_portal = time.time()
-                order = random_order(slugs)
+                portal_slugs = [p['slug'] for p in
+                                task_profiles(profiles_list, 'portal')]
+                order = random_order(portal_slugs)
                 if order:
                     log(f'portal: 按顺序探测 {" -> ".join(order)}')
                     threading.Thread(

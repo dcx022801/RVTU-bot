@@ -58,6 +58,25 @@ def main() -> int:
     errors, _warnings = profiles.validate_dir(profiles.config_dir('a'))
     checks['profile_ok'] = not errors and profiles.get_profile('a')['enabled']
 
+    profiles.save_meta('a', tasks={'checkin': True, 'happy': False,
+                                   'portal': True})
+    all_profiles = profiles.list_profiles(validate=True)
+    happy_users = [p['slug'] for p in
+                   multi_scheduler.task_profiles(all_profiles, 'happy')]
+    checks['task_filter'] = 'a' not in happy_users and 'b' in happy_users
+    bad_location = dict(VALID)
+    bad_location['location'] = {'latitude': '35.1', 'longitude': '119.1',
+                                'locationInfo': '<打卡点地点描述>'}
+    label_errors, _label_warnings = profiles.validate_data(bad_location)
+    checks['error_labels'] = (any('地点描述' in e for e in label_errors)
+                              and not any('location.' in e
+                                          for e in label_errors))
+    partial = {'creds': VALID['creds'], 'mail': {},
+               'macs': {'macs': []}, 'location': {}, 'portal': {}}
+    task_errors, _task_warnings = profiles.validate_data(
+        partial, {'checkin': True, 'happy': False, 'portal': False})
+    checks['task_validation'] = not task_errors
+
     admin = profiles.ensure_admin()
     again = profiles.ensure_admin()
     checks['admin_created'] = bool(admin) and again is None

@@ -37,7 +37,10 @@
   .login { max-width:420px; margin:12vh auto; }
   .login h1 { margin-bottom:4px; }
   .login .field { margin-top:14px; }
-  .error { color:var(--danger); font-size:12px; min-height:16px; margin-top:8px; }
+  .error { color:var(--danger); font-size:12px; min-height:16px; margin-top:8px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .checkrow { display:flex; gap:20px; flex-wrap:wrap; }
+  .checkrow label { display:inline-flex; gap:6px; align-items:center; margin:0; color:var(--text); font-size:13px; }
+  .checkrow input { width:auto; }
   .modal { position:fixed; inset:0; background:rgba(16,24,40,.45); display:flex; align-items:center; justify-content:center; padding:20px; z-index:20; }
   .modal .panel { background:#fff; border-radius:12px; width:min(920px,96vw); max-height:90vh; overflow:auto; padding:22px; }
   .modal .panel.small { width:min(560px,96vw); }
@@ -99,6 +102,13 @@
       <div><label>用户标识（创建后不可改）</label><input id="editSlug" disabled></div>
       <div><label>启用调度</label><label style="margin:0;color:var(--text)"><input type="checkbox" id="editEnabled" style="width:auto;margin-right:6px">启用</label></div>
     </div>
+    <h2 style="margin-top:20px">任务开关</h2>
+    <div class="checkrow">
+      <label><input type="checkbox" id="taskCheckin">宿舍打卡</label>
+      <label><input type="checkbox" id="taskHappy">晚自习打卡</label>
+      <label><input type="checkbox" id="taskPortal">校园网 Portal</label>
+    </div>
+    <div class="hint" style="margin-top:6px">宿舍打卡使用“登录凭据”中的身份证号/密码；时间由 defaults 共用（默认 21:00）。</div>
     <h2 style="margin-top:20px">登录凭据</h2>
     <div class="grid">
       <div><label>身份证号 / 账号</label><input id="credsUser"></div>
@@ -213,9 +223,13 @@ const STATUS = {
   retry_pending: '等待重试', failed: '失败', skipped: '已跳过'
 };
 
-function taskText(tasks) {
+function taskText(tasks, flags) {
   const parts = [];
   for (const [key, label] of [['checkin', '考勤'], ['happy', '晚自习']]) {
+    if (flags && flags[key] === false) {
+      parts.push(label + '：已关闭');
+      continue;
+    }
     const t = tasks[key];
     parts.push(label + '：' + (t && t.status ? (STATUS[t.status] || t.status) : '待执行'));
   }
@@ -258,6 +272,10 @@ function render(data) {
     if (u.errors && u.errors.length) tags.push('<span class="tag bad">配置错误</span>');
     else if (u.warnings && u.warnings.length) tags.push('<span class="tag warn">提示</span>');
     tags.push('<span class="tag">心跳 ' + fmtAge(u.heartbeat_age) + '</span>');
+    const offTasks = [['checkin', '宿舍'], ['happy', '晚自习'], ['portal', '校园网']]
+      .filter(([key]) => (u.tasks || {})[key] === false)
+      .map(([, label]) => label);
+    if (offTasks.length) tags.push('<span class="tag warn">关闭:' + offTasks.join('/') + '</span>');
     tdStatus.innerHTML = tags.join('');
     if (u.errors && u.errors.length) {
       const div = document.createElement('div');
@@ -266,7 +284,7 @@ function render(data) {
       tdStatus.appendChild(div);
     }
     const tdTasks = document.createElement('td');
-    tdTasks.textContent = taskText(u.tasks || {});
+    tdTasks.textContent = taskText(u.task_states || {}, u.tasks || {});
     const tdOps = document.createElement('td');
     const edit = button('编辑', () => openEditor(u.slug));
     const toggle = button(u.enabled ? '停用' : '启用', () => toggleUser(u));
@@ -372,6 +390,10 @@ async function openEditor(slug) {
     fill('editName', data.name);
     fill('editSlug', slug);
     $('editEnabled').checked = !!data.enabled;
+    const tasks = data.tasks || {};
+    $('taskCheckin').checked = tasks.checkin !== false;
+    $('taskHappy').checked = tasks.happy !== false;
+    $('taskPortal').checked = tasks.portal !== false;
     fill('credsUser', creds.user); fill('credsPass', creds.pass);
     fill('mailHost', mail.host); fill('mailPort', mail.port || 465);
     fill('mailUser', mail.user); fill('mailPass', mail.password);
@@ -429,6 +451,11 @@ async function saveEditor() {
       body: JSON.stringify({
         name: value('editName'),
         enabled: $('editEnabled').checked,
+        tasks: {
+          checkin: $('taskCheckin').checked,
+          happy: $('taskHappy').checked,
+          portal: $('taskPortal').checked
+        },
         config
       })
     });

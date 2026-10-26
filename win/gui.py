@@ -822,10 +822,31 @@ class RvtuApp:
         try:
             sched = load_schedule(str(DEFAULTS_DIR / 'schedule.json'), required=True)
             load_api(str(DEFAULTS_DIR / 'api.json'), required=True)
-            warnings.extend(sched.get('_warnings', []))
+            warnings.extend(profiles.format_error(w)
+                            for w in sched.get('_warnings', []))
         except Exception as exc:
-            errors.append(f'defaults：{exc}')
+            errors.append(f'程序参数：{profiles.format_error(exc)}')
         return errors, warnings
+
+    def _show_wrapped(self, title: str, text: str) -> None:
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry('640x340')
+        win.minsize(420, 220)
+        win.transient(self.root)
+        frame = ttk.Frame(win, padding=12)
+        frame.pack(fill='both', expand=True)
+        body = tk.Text(frame, wrap='word', font=(FONT, 10), relief='flat',
+                       borderwidth=1, background='#ffffff')
+        scroll = ttk.Scrollbar(frame, orient='vertical', command=body.yview)
+        body.configure(yscrollcommand=scroll.set)
+        body.insert('1.0', text)
+        body.configure(state='disabled')
+        body.pack(side='left', fill='both', expand=True)
+        scroll.pack(side='right', fill='y')
+        ttk.Button(win, text='关闭', command=win.destroy).pack(pady=(0, 10))
+        win.grab_set()
+        win.focus_set()
 
     def check_config_ui(self) -> None:
         self._refresh_profiles()
@@ -845,14 +866,13 @@ class RvtuApp:
             if warnings:
                 text += nl * 2 + '提示：' + nl * 2 + nl.join(
                     f'· {item}' for item in warnings)
-            messagebox.showerror(f'配置检查 · {slug}', text, parent=self.root)
+            self._show_wrapped(f'配置检查 · {slug}', text)
         elif warnings:
             text = '配置可用，但有以下提示：' + nl * 2 + nl.join(
                 f'· {item}' for item in warnings)
-            messagebox.showwarning(f'配置检查 · {slug}', text, parent=self.root)
+            self._show_wrapped(f'配置检查 · {slug}', text)
         else:
-            messagebox.showinfo(f'配置检查 · {slug}', '配置检查通过。',
-                                parent=self.root)
+            self._show_wrapped(f'配置检查 · {slug}', '配置检查通过。')
 
     def _refresh_view(self) -> None:
         if self._quitting:
@@ -904,15 +924,22 @@ class RvtuApp:
             info = self._profiles_by_slug.get(slug) or {}
             tasks = (all_tasks or {}).get(slug) or {}
             if sched:
+                task_flags = info.get('tasks') or {}
                 for name, label in (('checkin', '宿舍考勤'), ('happy', '晚自习')):
                     item = sched[name]
+                    if not task_flags.get(name, True):
+                        self.task_vars[name].set(
+                            f'{label}  {item["hour"]:02d}:{item["minute"]:02d}  ·  已关闭')
+                        continue
                     current = tasks.get(name) or {}
                     status = STATUS_TEXT.get(current.get('status') or '', '待执行')
                     suffix = '（配置错误）' if info.get('errors') else ''
                     self.task_vars[name].set(
                         f'{label}  {item["hour"]:02d}:{item["minute"]:02d}  ·  {status}{suffix}')
                 interval = sched['portal']['interval_minutes']
-                if info.get('errors'):
+                if not task_flags.get('portal', True):
+                    portal_status = '已关闭'
+                elif info.get('errors'):
                     portal_status = '配置错误'
                 elif not info.get('enabled', False):
                     portal_status = '已停用'

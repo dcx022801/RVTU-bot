@@ -103,7 +103,7 @@ def status_payload():
     now = time.time()
     for item in profiles_list:
         slug = item['slug']
-        item['tasks'] = tasks.get(slug) or {}
+        item['task_states'] = tasks.get(slug) or {}
         hb = heartbeats.get(slug)
         item['heartbeat'] = hb
         item['heartbeat_age'] = max(0, int(now - hb)) if hb else None
@@ -122,7 +122,7 @@ def status_payload():
 def user_payload(slug):
     info = profiles.get_profile(slug, validate=True)
     state = profiles.read_multi_state()
-    info['tasks'] = (state.get('tasks') or {}).get(slug) or {}
+    info['task_states'] = (state.get('tasks') or {}).get(slug) or {}
     hb = (state.get('heartbeats') or {}).get(slug)
     info['heartbeat'] = hb
     info['heartbeat_age'] = max(0, int(time.time() - hb)) if hb else None
@@ -296,13 +296,22 @@ class Handler(BaseHTTPRequestHandler):
         name = str(body.get('name') or '').strip()
         if not name:
             return self._json({'error': '用户名称不能为空'}, 400)
-        errors, warnings = profiles.validate_data(config)
+        tasks = body.get('tasks')
+        if tasks is not None and not isinstance(tasks, dict):
+            return self._json({'error': 'tasks 必须是对象'}, 400)
+        if tasks is None:
+            try:
+                tasks = profiles.get_profile(slug)['tasks']
+            except Exception as exc:
+                return self._json({'error': str(exc)}, 404)
+        errors, warnings = profiles.validate_data(config, tasks)
         if errors:
             return self._json({'error': '配置未通过校验',
                                'errors': errors, 'warnings': warnings}, 400)
         try:
             profiles.write_config(slug, config)
-            profiles.save_meta(slug, name, bool(body.get('enabled', False)))
+            profiles.save_meta(slug, name, bool(body.get('enabled', False)),
+                               tasks=tasks)
             profiles.touch_reload()
             return self._json({'ok': True, 'warnings': warnings,
                                'user': user_payload(slug)})

@@ -80,6 +80,12 @@ class ProfileManager(tk.Toplevel):
                 item = own.get(key) or {}
                 bits.append(f'{label}:{item.get("status") or "待执行"}')
             status = ' '.join(bits) + f' · {age}'
+            task_flags = profile.get('tasks') or {}
+            off_tasks = [label for key, label in (
+                ('checkin', '宿舍'), ('happy', '晚自习'), ('portal', '校园网'))
+                if not task_flags.get(key, True)]
+            if off_tasks:
+                status = '已关闭(' + '/'.join(off_tasks) + ') · ' + status
             if profile['errors']:
                 status = '配置错误 · ' + status
             elif profile['warnings']:
@@ -214,7 +220,10 @@ class ProfileEditor(tk.Toplevel):
         self.var_name = tk.StringVar()
         self.var_slug = tk.StringVar(value=self.slug)
         self.var_enabled = tk.BooleanVar()
-        self._label_entry(basic, '用户名称', self.var_name, 0)
+        self.var_task_checkin = tk.BooleanVar(value=True)
+        self.var_task_happy = tk.BooleanVar(value=True)
+        self.var_task_portal = tk.BooleanVar(value=True)
+        self._label_entry(basic, '用户名称 *', self.var_name, 0)
         self._label_entry(basic, '用户标识（不可改）', self.var_slug, 1, state='disabled')
         ttk.Checkbutton(basic, text='启用调度', variable=self.var_enabled).grid(
             row=2, column=0, columnspan=2, sticky='w', pady=(10, 0))
@@ -224,9 +233,19 @@ class ProfileEditor(tk.Toplevel):
         self.notebook.add(account, text='账号')
         self.var_user = tk.StringVar()
         self.var_pass = tk.StringVar()
-        self._label_entry(account, '身份证号 / 账号', self.var_user, 0)
-        self._label_entry(account, '统一密码', self.var_pass, 1, show='*')
+        self._label_entry(account, '身份证号 / 账号 *', self.var_user, 0)
+        self._label_entry(account, '统一密码 *', self.var_pass, 1, show='*')
         account.columnconfigure(1, weight=1)
+
+        dorm = ttk.Frame(self.notebook, padding=14)
+        self.notebook.add(dorm, text='宿舍打卡')
+        ttk.Label(dorm, text='使用“账号”页的身份证号/密码，无需单独填写 MAC 或坐标。',
+                  wraplength=620, justify='left').pack(anchor='w', pady=(0, 8))
+        ttk.Label(dorm, text='打卡时间由 defaults/schedule.json 共用（默认 21:00）；'
+                             '确认窗口/迟到线以学校系统为准。',
+                  wraplength=620, justify='left').pack(anchor='w', pady=(0, 12))
+        ttk.Checkbutton(dorm, text='启用宿舍打卡（每天 21:00 共用时间表）',
+                        variable=self.var_task_checkin).pack(anchor='w')
 
         mail = ttk.Frame(self.notebook, padding=14)
         self.notebook.add(mail, text='邮件')
@@ -248,17 +267,21 @@ class ProfileEditor(tk.Toplevel):
 
         happy = ttk.Frame(self.notebook, padding=14)
         self.notebook.add(happy, text='晚自习')
-        ttk.Label(happy, text='MAC 池（逗号/换行分隔）').grid(row=0, column=0, sticky='nw', pady=4)
+        ttk.Checkbutton(happy, text='启用晚自习打卡（每天 19:00 共用时间表）',
+                        variable=self.var_task_happy).grid(
+            row=0, column=0, columnspan=2, sticky='w', pady=(0, 10))
+        ttk.Label(happy, text='晚自习 MAC 池 *（逗号/换行分隔）').grid(
+            row=1, column=0, sticky='nw', pady=4)
         self.text_macs = tk.Text(happy, height=5, font=(FONT, 10), wrap='word')
-        self.text_macs.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(0, 8))
+        self.text_macs.grid(row=2, column=0, columnspan=2, sticky='nsew', pady=(0, 8))
         self.var_lat = tk.StringVar()
         self.var_lon = tk.StringVar()
         self.var_info = tk.StringVar()
-        self._label_entry(happy, '纬度', self.var_lat, 2)
-        self._label_entry(happy, '经度', self.var_lon, 3)
-        self._label_entry(happy, '地点描述', self.var_info, 4)
+        self._label_entry(happy, '纬度 *', self.var_lat, 3)
+        self._label_entry(happy, '经度 *', self.var_lon, 4)
+        self._label_entry(happy, '地点描述 *', self.var_info, 5)
         happy.columnconfigure(1, weight=1)
-        happy.rowconfigure(1, weight=1)
+        happy.rowconfigure(2, weight=1)
 
         portal = ttk.Frame(self.notebook, padding=14)
         self.notebook.add(portal, text='校园网')
@@ -268,22 +291,34 @@ class ProfileEditor(tk.Toplevel):
         self.var_schemes = tk.StringVar(value='https,http')
         self.var_allow_any = tk.BooleanVar()
         self.var_mac_format = tk.StringVar(value='auto')
-        self._label_entry(portal, '被认证网卡 MAC（umac）', self.var_umac, 0)
-        self._label_entry(portal, '上联设备 MAC', self.var_uplink, 1)
-        self._label_entry(portal, '允许门户主机（逗号分隔）', self.var_hosts, 2)
-        self._label_entry(portal, '允许协议（逗号分隔）', self.var_schemes, 3)
-        ttk.Label(portal, text='MAC 分隔符').grid(row=4, column=0, sticky='w', pady=6)
+        ttk.Checkbutton(portal, text='启用校园网 Portal 认证（每 1 分钟共用间隔）',
+                        variable=self.var_task_portal).grid(
+            row=0, column=0, columnspan=2, sticky='w', pady=(0, 10))
+        self._label_entry(portal, '被认证网卡 MAC（umac）', self.var_umac, 1)
+        self._label_entry(portal, '上联设备 MAC', self.var_uplink, 2)
+        self._label_entry(portal, '允许门户主机（逗号分隔，建议填写）',
+                          self.var_hosts, 3)
+        self._label_entry(portal, '允许协议（逗号分隔）', self.var_schemes, 4)
+        ttk.Label(portal, text='MAC 分隔符').grid(row=5, column=0, sticky='w', pady=6)
         ttk.Combobox(portal, textvariable=self.var_mac_format,
                      values=('auto', 'colon', 'hyphen'),
-                     state='readonly').grid(row=4, column=1, sticky='ew', pady=6)
+                     state='readonly').grid(row=5, column=1, sticky='ew', pady=6)
         ttk.Checkbutton(portal, text='allowAny（跳过白名单，不安全）',
                         variable=self.var_allow_any).grid(
-            row=5, column=0, columnspan=2, sticky='w', pady=(8, 0))
+            row=6, column=0, columnspan=2, sticky='w', pady=(8, 0))
         portal.columnconfigure(1, weight=1)
 
-        self.error_var = tk.StringVar()
-        ttk.Label(self, textvariable=self.error_var,
-                  foreground='#a40e26').pack(fill='x', padx=16)
+        error_frame = ttk.Frame(self, padding=(16, 0, 16, 0))
+        error_frame.pack(fill='x')
+        self.error_text = tk.Text(error_frame, height=3, wrap='word',
+                                  font=(FONT, 9), foreground='#a40e26',
+                                  background='#fff5f5', relief='flat',
+                                  borderwidth=1, state='disabled')
+        error_scroll = ttk.Scrollbar(error_frame, orient='vertical',
+                                     command=self.error_text.yview)
+        self.error_text.configure(yscrollcommand=error_scroll.set)
+        self.error_text.pack(side='left', fill='x', expand=True)
+        error_scroll.pack(side='right', fill='y')
         bottom = ttk.Frame(self, padding=(12, 6, 12, 12))
         bottom.pack(fill='x')
         ttk.Button(bottom, text='取消', command=self.destroy).pack(side='right')
@@ -304,6 +339,10 @@ class ProfileEditor(tk.Toplevel):
         portal = data.get('portal') or {}
         self.var_name.set(self.profile['name'])
         self.var_enabled.set(bool(self.profile['enabled']))
+        tasks = self.profile.get('tasks') or {}
+        self.var_task_checkin.set(bool(tasks.get('checkin', True)))
+        self.var_task_happy.set(bool(tasks.get('happy', True)))
+        self.var_task_portal.set(bool(tasks.get('portal', True)))
         self.var_user.set(creds.get('user') or '')
         self.var_pass.set(creds.get('pass') or '')
         self.var_mail_host.set(mail.get('host') or '')
@@ -328,17 +367,32 @@ class ProfileEditor(tk.Toplevel):
         self.var_allow_any.set(bool(portal.get('allowAny')))
         self.var_mac_format.set(portal.get('macFormat') or 'auto')
 
+    def _set_error(self, text: str) -> None:
+        self.error_text.configure(state='normal')
+        self.error_text.delete('1.0', 'end')
+        if text:
+            self.error_text.insert('1.0', text)
+            self.error_text.configure(height=min(6, max(3, text.count(chr(10)) + 2)))
+            self.error_text.see('1.0')
+        self.error_text.configure(state='disabled')
+
     def _report(self, errors, warnings):
-        text = '；'.join(errors + warnings)
-        self.error_var.set(text[:500])
+        lines = []
         if errors:
-            messagebox.showerror('配置未通过校验', '\n'.join(errors), parent=self)
+            lines.append('配置错误：')
+            lines.extend('· ' + item for item in errors)
+        if warnings:
+            lines.append('提示：')
+            lines.extend('· ' + item for item in warnings)
+        self._set_error(chr(10).join(lines))
+        if errors:
             return False
         blocking = [w for w in warnings
                     if not w.startswith('未启用邮件通知')]
         if blocking:
             return messagebox.askyesno(
-                '配置提示', '\n'.join(blocking) + '\n\n仍要保存吗？', parent=self)
+                '配置提示', chr(10).join(blocking) + chr(10) * 2 + '仍要保存吗？',
+                parent=self)
         return True
 
     def save(self):
@@ -380,7 +434,12 @@ class ProfileEditor(tk.Toplevel):
                 'macFormat': self.var_mac_format.get() or 'auto',
             },
         }
-        errors, warnings = profiles.validate_data(data)
+        tasks = {
+            'checkin': bool(self.var_task_checkin.get()),
+            'happy': bool(self.var_task_happy.get()),
+            'portal': bool(self.var_task_portal.get()),
+        }
+        errors, warnings = profiles.validate_data(data, tasks)
         if not self._report(errors, warnings):
             return
         name = self.var_name.get().strip()
@@ -389,8 +448,9 @@ class ProfileEditor(tk.Toplevel):
             return
         try:
             profiles.write_config(self.slug, data)
-            profiles.save_meta(self.slug, name=name,
-                               enabled=bool(self.var_enabled.get()))
+            profiles.save_meta(
+                self.slug, name=name, enabled=bool(self.var_enabled.get()),
+                tasks=tasks)
             profiles.touch_reload()
         except Exception as exc:
             messagebox.showerror('保存失败', str(exc), parent=self)

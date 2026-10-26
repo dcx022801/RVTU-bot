@@ -37,6 +37,7 @@ RVTU-bot/
 ## 特性
 
 - **多用户**：每个用户独立身份证号/密码、MAC 池、定位、邮件、Portal 配置；登录态、日志、任务状态互相隔离
+- **任务开关**：每个用户可分别开关宿舍打卡、晚自习、校园网 Portal；关闭的任务不参与预检/拉起，也不再要求该任务的必填项（如关闭晚自习后无需 MAC/定位）
 - **共享时间表**：所有启用用户共用 `defaults/schedule.json` 的 19:00 / 21:00 / Portal 间隔
 - **随机顺序 + 间隔拉起**：预检时随机决定用户顺序；到点后按顺序启动，相邻用户间隔 1~10 秒
 - **Web 管理**：Docker 版通过 `http://<服务器IP>:11451` 管理用户、启停、查看状态和日志
@@ -103,7 +104,7 @@ sh docker/stop.sh             # 停止容器（保留 state/）
 ### Web 管理
 
 - 用户列表：启用/停用、编辑、删除（删除移入 `state/users/.trash`，可恢复）。
-- 编辑字段：显示名、身份证号/密码、SMTP、MAC 池、定位、Portal 白名单/MAC 格式。
+- 编辑字段：显示名、身份证号/密码、SMTP、MAC 池、定位、Portal 白名单/MAC 格式；三项任务可分别开关。
 - 状态与顺序：显示全局心跳、今日预检随机顺序、每个用户的考勤/晚自习状态。
 - 日志：按用户查看 `multi.log` / `checkin.log` / `happy_checkin.log` / `portal-auth.log` 等。
 - 保存后约 5 秒内生效，无需重启容器。
@@ -122,8 +123,9 @@ win\start.bat
 ```
 
 - 首次启动在 `state\users\default\` 创建默认用户（或从旧 `state\config` 迁移）。
-- 主界面“用户管理”可新增/编辑/删除用户、启用/停用、打开配置目录；表单覆盖账号、邮件、MAC/定位、Portal。
+- 主界面“用户管理”可新增/编辑/删除用户、启用/停用、打开配置目录；表单覆盖账号、宿舍打卡、邮件、MAC/定位、Portal，并可分别开关三项任务。
 - 主界面下拉框选择用户，查看该用户的考勤/晚自习/Portal 状态；日志窗口显示全局多用户日志。
+- 错误提示会按窗口宽度自动换行，并使用与表单一致的字段名（如“地点描述”“允许门户主机”）。
 - 关闭窗口 = 最小化到系统托盘；勾选“开机自启”写入当前用户注册表。
 - 所有用户/凭据/日志保存在 `state\users\`（`.gitignore` 忽略），移动 exe/项目请保留 `state\`。
 
@@ -135,10 +137,10 @@ Releases 提供 `RVTU-bot-<版本>-win64.zip`：无需安装 Python，解压到�
 
 ```bat
 win\install.bat
-win\build-exe.bat v2026.10.26.1
+win\build-exe.bat v2026.10.26.2
 ```
 
-产物为 `dist\RVTU-bot-v2026.10.26.1-win64.zip`；构建脚本会自动安装 PyInstaller。未做代码签名，SmartScreen 可能提示。
+产物为 `dist\RVTU-bot-v2026.10.26.2-win64.zip`；构建脚本会自动安装 PyInstaller。未做代码签名，SmartScreen 可能提示。
 
 ## 配置
 
@@ -149,6 +151,7 @@ win\build-exe.bat v2026.10.26.1
 | `state/users/<slug>/config/macs.json` | macs[] |
 | `state/users/<slug>/config/location.json` | latitude / longitude / locationInfo |
 | `state/users/<slug>/config/portal.json` | umac / uplinkMac / allowedHosts / allowedSchemes / allowAny / macFormat |
+| `state/users/<slug>/profile.json` | name / enabled / tasks{checkin,happy,portal} |
 | `state/web-admin.json` | Docker Web 管理员（仅哈希） |
 
 新用户模板在 `defaults/user-template/`；Docker 镜像内为 `/defaults/user-template`。

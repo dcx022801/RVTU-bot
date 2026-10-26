@@ -34,6 +34,29 @@ ADMIN_FILE = STATE_DIR / 'web-admin.json'
 RELOAD_FLAG = STATE_DIR / 'reload.flag'
 CONFIG_FILES = ('creds.json', 'mail.json', 'macs.json',
                 'location.json', 'portal.json')
+DEFAULT_TASKS = {'checkin': True, 'happy': True, 'portal': True}
+TASK_LABELS = {'checkin': '宿舍打卡', 'happy': '晚自习', 'portal': '校园网'}
+ERROR_LABELS = {
+    'location.locationInfo': '地点描述',
+    'location.latitude': '纬度',
+    'location.longitude': '经度',
+    'portal.allowedSchemes': '允许协议',
+    'portal.allowedHosts': '允许门户主机',
+    'portal.uplinkMac': '上联设备 MAC',
+    'portal.macFormat': 'MAC 分隔符',
+    'portal.umac': '被认证网卡 MAC',
+    'creds.user': '身份证号/账号',
+    'creds.pass': '统一密码',
+    'macs.macs[]': '晚自习 MAC 池',
+    'macs.macs': '晚自习 MAC 池',
+    'mail.json': '邮件配置',
+    'mail.port': '邮件端口',
+    'creds.json': '账号配置',
+    'macs.json': '晚自习 MAC 池',
+    'location.json': '定位配置',
+    'portal.json': '校园网配置',
+    'mail.': '邮件配置',
+}
 SLUG_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,31}$')
 ADMIN_ITERATIONS = 260000
 _LOWER = 'abcdefghijklmnopqrstuvwxyz'
@@ -78,6 +101,24 @@ def valid_slug(slug: str) -> bool:
     return bool(SLUG_RE.match(slug or ''))
 
 
+def format_error(message) -> str:
+    """把内部 JSON 键名映射为 GUI/Web 字段名。"""
+    text = str(message)
+    for key in sorted(ERROR_LABELS, key=len, reverse=True):
+        text = text.replace(key, ERROR_LABELS[key])
+    return text
+
+
+def normalized_tasks(tasks=None) -> dict:
+    raw = tasks if isinstance(tasks, dict) else {}
+    return {key: bool(raw.get(key, True)) for key in DEFAULT_TASKS}
+
+
+def _tasks(data: dict) -> dict:
+    raw = data.get('tasks') if isinstance(data.get('tasks'), dict) else {}
+    return normalized_tasks(raw)
+
+
 def profile_path(slug: str) -> Path:
     if not valid_slug(slug):
         raise ProfileError('用户标识只能包含小写字母、数字、下划线、连字符（1~32 位）')
@@ -101,12 +142,14 @@ def _meta(slug: str) -> dict:
     return {
         'name': str(data.get('name') or slug),
         'enabled': bool(data.get('enabled', False)),
+        'tasks': _tasks(data),
         'created': float(data.get('created') or 0),
         'updated': float(data.get('updated') or 0),
     }
 
 
-def save_meta(slug: str, name: str = None, enabled: bool = None) -> dict:
+def save_meta(slug: str, name: str = None, enabled: bool = None,
+              tasks: dict = None) -> dict:
     current = _meta(slug)
     if name is not None:
         name = str(name).strip()
@@ -115,6 +158,13 @@ def save_meta(slug: str, name: str = None, enabled: bool = None) -> dict:
         current['name'] = name
     if enabled is not None:
         current['enabled'] = bool(enabled)
+    if tasks is not None:
+        if not isinstance(tasks, dict):
+            raise ProfileError('任务开关格式错误')
+        current['tasks'] = {
+            key: bool(tasks.get(key, current['tasks'].get(key, True)))
+            for key in DEFAULT_TASKS
+        }
     current['updated'] = time.time()
     if not current['created']:
         current['created'] = current['updated']
@@ -133,11 +183,12 @@ def list_profiles(validate: bool = False) -> list:
             continue
         meta = _meta(slug)
         cfg = item / 'config'
-        errors, warnings = validate_dir(cfg) if validate else ([], [])
+        errors, warnings = validate_dir(cfg, meta['tasks']) if validate else ([], [])
         result.append({
             'slug': slug,
             'name': meta['name'],
             'enabled': meta['enabled'],
+            'tasks': meta['tasks'],
             'created': meta['created'],
             'updated': meta['updated'],
             'config_dir': str(cfg),
@@ -153,11 +204,12 @@ def get_profile(slug: str, validate: bool = False) -> dict:
         raise ProfileError(f'用户不存在：{slug}')
     meta = _meta(slug)
     cfg = config_dir(slug)
-    errors, warnings = validate_dir(cfg) if validate else ([], [])
+    errors, warnings = validate_dir(cfg, meta['tasks']) if validate else ([], [])
     return {
         'slug': slug,
         'name': meta['name'],
         'enabled': meta['enabled'],
+        'tasks': meta['tasks'],
         'created': meta['created'],
         'updated': meta['updated'],
         'config_dir': str(cfg),
@@ -208,6 +260,7 @@ def create_profile(name: str, slug: str = None, enabled: bool = False,
     now = time.time()
     _write_json(path / 'profile.json',
                 {'name': name, 'enabled': bool(enabled),
+                 'tasks': dict(DEFAULT_TASKS),
                  'created': now, 'updated': now})
     touch_reload()
     return get_profile(slug)
@@ -249,57 +302,63 @@ def write_config(slug: str, data: dict) -> None:
     save_meta(slug)
 
 
-def _validate_files(cfg: Path):
+def _validate_files(cfg: Path, tasks=None):
+    tasks = normalized_tasks(tasks)
     errors = []
     warnings = []
-    try:
-        load_creds(str(cfg / 'creds.json'))
-    except ConfigError as exc:
-        errors.append(str(exc))
-    except Exception as exc:
-        errors.append(f'creds.json：{exc}')
-    try:
-        load_macs(str(cfg / 'macs.json'))
-    except ConfigError as exc:
-        errors.append(str(exc))
-    except Exception as exc:
-        errors.append(f'macs.json：{exc}')
-    try:
-        load_location(str(cfg / 'location.json'))
-    except ConfigError as exc:
-        errors.append(str(exc))
-    except Exception as exc:
-        errors.append(f'location.json：{exc}')
-    try:
-        portal = load_portal(str(cfg / 'portal.json'))
-        if not portal['allowedHosts'] and not portal['allowAny']:
-            warnings.append('portal.allowedHosts 为空，校园网认证会拒绝提交凭据')
-    except ConfigError as exc:
-        errors.append(str(exc))
-    except Exception as exc:
-        errors.append(f'portal.json：{exc}')
+    if any(tasks.values()):
+        try:
+            load_creds(str(cfg / 'creds.json'))
+        except ConfigError as exc:
+            errors.append(format_error(exc))
+        except Exception as exc:
+            errors.append(format_error(f'creds.json：{exc}'))
+    if tasks['happy']:
+        try:
+            load_macs(str(cfg / 'macs.json'))
+        except ConfigError as exc:
+            errors.append(format_error(exc))
+        except Exception as exc:
+            errors.append(format_error(f'macs.json：{exc}'))
+        try:
+            load_location(str(cfg / 'location.json'))
+        except ConfigError as exc:
+            errors.append(format_error(exc))
+        except Exception as exc:
+            errors.append(format_error(f'location.json：{exc}'))
+    if tasks['portal']:
+        try:
+            portal = load_portal(str(cfg / 'portal.json'))
+            if not portal['allowedHosts'] and not portal['allowAny']:
+                warnings.append(format_error(
+                    'portal.allowedHosts 为空，校园网认证会拒绝提交凭据'))
+        except ConfigError as exc:
+            errors.append(format_error(exc))
+        except Exception as exc:
+            errors.append(format_error(f'portal.json：{exc}'))
     try:
         mail = load_mail(str(cfg / 'mail.json'))
         if mail is None:
-            warnings.append('未启用邮件通知（mail.json 为空或仍是占位符）')
+            warnings.append(format_error(
+                '未启用邮件通知（mail.json 为空或仍是占位符）'))
     except ConfigError as exc:
-        warnings.append(f'邮件配置无效：{exc}')
+        warnings.append(format_error(f'邮件配置无效：{exc}'))
     except Exception as exc:
-        warnings.append(f'mail.json：{exc}')
+        warnings.append(format_error(f'mail.json：{exc}'))
     return errors, warnings
 
 
-def validate_dir(cfg: Path):
+def validate_dir(cfg: Path, tasks=None):
     if not Path(cfg).is_dir():
         return ['缺少 config 目录'], []
-    return _validate_files(Path(cfg))
+    return _validate_files(Path(cfg), tasks)
 
 
-def validate_data(data: dict):
+def validate_data(data: dict, tasks=None):
     with tempfile.TemporaryDirectory(prefix='rvtu-profile-') as temp:
         cfg = Path(temp)
         _write_config_dir(cfg, data)
-        return _validate_files(cfg)
+        return _validate_files(cfg, tasks)
 
 
 def touch_reload() -> None:
