@@ -14,23 +14,9 @@
 
 ## Docker 部署
 
-要求：x86_64 Linux、Docker（compose 方式需 Compose ≥ 2.24，host 网络）。
+要求：x86_64 Linux、Docker（host 网络）。
 
 镜像已公开：`ghcr.io/dcx022801/rvtu-bot:latest`，可直接拉取，无需登录。
-
-### 方式一：compose（推荐）
-
-```sh
-git clone https://github.com/dcx022801/RVTU-bot.git
-cd RVTU-bot/docker
-docker compose pull
-docker compose up -d
-docker logs rvtu-bot | grep -A5 'Web 管理员'
-```
-
-compose 默认 `image` 就是 `ghcr.io/dcx022801/rvtu-bot:latest`，无需本地构建；只有改代码后才需要 `docker compose up -d --build`。
-
-### 方式二：直接拉取运行（不 clone）
 
 ```sh
 docker pull ghcr.io/dcx022801/rvtu-bot:latest
@@ -40,9 +26,7 @@ docker run -d --name rvtu-bot --network host --restart unless-stopped --init \
 docker logs rvtu-bot | grep -A5 'Web 管理员'
 ```
 
-直接 run 的持久化数据在命名卷 `rvtu-state`（管理员、用户、登录态、日志）；compose 方式在仓库的 `state/`。
-
-首次启动会在日志中打印一次性管理员账号，然后访问 `http://<服务器IP>:11451` 登录，添加用户并启用。
+持久化数据在命名卷 `rvtu-state`（管理员、用户、登录态、日志）。首次启动会在日志中打印一次性管理员账号，然后访问 `http://<服务器IP>:11451` 登录，添加用户并启用。
 
 ## Windows GUI
 
@@ -57,11 +41,11 @@ win\start.bat
 
 ## 数据与备份
 
-管理员账号、用户凭据、登录态和日志全部保存在 `state/`：
+Docker 直接运行使用命名卷 `rvtu-state`，Windows 使用程序同级的 `state/`。管理员账号、用户凭据、登录态和日志都在其中：
 
-- 升级、重建容器或移动程序时务必保留 `state/`，备份它即可备份所有数据。
-- 忘记管理员密码：删除 `state/web-admin.json` 后重启，从日志获取新账号。
-- 每个用户的配置在 `state/users/<用户标识>/config/`，推荐通过 Web/GUI 修改。
+- 升级、重建容器或移动程序时务必保留命名卷 `rvtu-state` / `state/`，备份它即可备份所有数据。
+- 忘记管理员密码：删除其中的 `web-admin.json` 后重启容器/程序，从日志获取新账号。
+- 每个用户的配置在 `users/<用户标识>/config/`，推荐通过 Web/GUI 修改。
 
 旧版的 `state/config` 或挂载的 `config/` 会在首次启动时自动迁移为 `default` 用户。
 
