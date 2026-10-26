@@ -59,7 +59,7 @@ def write_text(path: Path, text: str, encoding: str = 'utf-8-sig') -> None:
 
 
 def main() -> int:
-    version = sys.argv[1] if len(sys.argv) > 1 else 'v2026.10.26'
+    version = sys.argv[1] if len(sys.argv) > 1 else 'v2026.10.26.1'
     tcl, tk = find_tcl()
     env = os.environ.copy()
     if tcl and tk:

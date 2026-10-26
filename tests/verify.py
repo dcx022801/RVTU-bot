@@ -6,7 +6,7 @@
     python3 tests/verify.py
 
 覆盖：静态检查、配置校验、checkin/happy 关键分支、Portal 白名单/URL 解码/
-MAC 规范化/204 复核、调度持久化/重试/预检、bootstrap 与 refresh 参数。
+MAC 规范化/204 复核、调度持久化/重试/预检、多用户配置、refresh 参数。
 """
 import compileall
 import datetime
@@ -25,7 +25,6 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / 'app' / 'scripts'
 PY = sys.executable
 sys.path.insert(0, str(REPO / 'app'))
-sys.path.insert(0, str(REPO / 'docker'))
 sys.path.insert(0, str(SCRIPTS))
 
 RESULTS = []
@@ -200,14 +199,17 @@ threading.Thread(target=SERVER.serve_forever, daemon=True).start()
 # ---------------- tests ----------------
 def test_static():
     check('A01 Python 语法', compileall.compile_dir(str(REPO / 'app'), quiet=1))
-    try:
-        compile((REPO / 'win' / 'gui.py').read_text(encoding='utf-8'),
-                str(REPO / 'win' / 'gui.py'), 'exec')
-        gui_syntax = True
-    except SyntaxError:
-        gui_syntax = False
+    gui_syntax = True
+    for name in ('gui.py', 'profile_dialog.py', 'build_exe.py'):
+        try:
+            compile((REPO / 'win' / name).read_text(encoding='utf-8'),
+                    str(REPO / 'win' / name), 'exec')
+        except SyntaxError:
+            gui_syntax = False
     check('A01 Windows GUI 语法', gui_syntax)
-    for path in list((REPO / 'config').glob('*.json')) + list((REPO / 'defaults').glob('*.json')):
+    for path in (list((REPO / 'config').glob('*.json'))
+                 + list((REPO / 'defaults').glob('*.json'))
+                 + list((REPO / 'defaults' / 'user-template').glob('*.json'))):
         try:
             json.loads(path.read_text(encoding='utf-8'))
             ok = True
@@ -251,6 +253,10 @@ def test_config():
     data = json.loads(json.dumps(base)); data['portal']['interval_minutes'] = 0
     write_json(tmp / 'interval.json', data)
     check('F11 非法间隔钳制', configutil.load_schedule(str(tmp / 'interval.json'))['portal']['interval_minutes'] == 1)
+    parsed = configutil.load_schedule(str(REPO / 'defaults' / 'schedule.json'))
+    check('F14 多用户启动间隔',
+          parsed['multi'] == {'launch_gap_min_sec': 1, 'launch_gap_max_sec': 10},
+          f"multi={parsed.get('multi')}")
     write_json(tmp / 'mail.json', {'host': 'smtp.example', 'user': 'u'})
     try:
         configutil.load_mail(str(tmp / 'mail.json'))
@@ -523,33 +529,25 @@ def test_scheduler():
           f'calls={calls},state={state["tasks"]}')
 
 
-def test_bootstrap_refresh():
-    import bootstrap
-    base = pathlib.Path(tempfile.mkdtemp())
+def test_multi_selftest():
     env = os.environ.copy()
-    env.update({
-        'CREDS_USER': 'fake-id', 'CREDS_PASS': 'fake-pass',
-        'MACS': 'AA:BB:CC:DD:EE:01', 'LOCATION_LAT': '35.1',
-        'LOCATION_LON': '119.1', 'LOCATION_INFO': 'test',
-        'PORTAL_ALLOWED_HOSTS': 'portal.example',
-        'STATE_DIR': str(base / 'state'),
-        'ENV_CONFIG_DIR': str(base / 'state' / 'config'),
-        'PYTHONIOENCODING': 'utf-8',
-    })
-    proc = subprocess.run([PY, str(REPO / 'docker' / 'bootstrap.py')], env=env,
-                          capture_output=True, text=True, encoding='utf-8', timeout=20)
-    check('D08 bootstrap 生成', proc.returncode == 0 and
-          (base / 'state' / 'config' / 'creds.json').exists(), f'rc={proc.returncode}')
-    env2 = env.copy(); env2['CREDS_USER'] = '   '
-    proc = subprocess.run([PY, str(REPO / 'docker' / 'bootstrap.py')], env=env2,
-                          capture_output=True, text=True, encoding='utf-8', timeout=20)
-    check('D10 空白 CREDS_USER 拒绝', proc.returncode == 2, f'rc={proc.returncode}')
-    env4 = env.copy(); env4['MAIL_HOST'] = 'smtp.163.com'; env4['MAIL_PORT'] = '465'
-    proc = subprocess.run([PY, str(REPO / 'docker' / 'bootstrap.py')], env=env4,
-                          capture_output=True, text=True, encoding='utf-8', timeout=20)
-    mail = json.loads((base / 'state' / 'config' / 'mail.json').read_text(encoding='utf-8'))
-    check('D08 默认邮件主机不误启用', proc.returncode == 0 and mail == {},
-          f'rc={proc.returncode},mail={mail}')
+    env['PYTHONIOENCODING'] = 'utf-8'
+    env['PYTHONUTF8'] = '1'
+    proc = subprocess.run([PY, str(REPO / 'tests' / 'multi_selftest.py')],
+                          env=env, capture_output=True, text=True,
+                          encoding='utf-8', timeout=60)
+    ok = False
+    detail = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ''
+    if proc.returncode == 0 and detail:
+        try:
+            ok = all(json.loads(detail).values())
+        except Exception:
+            ok = False
+    check('G01 多用户配置/管理员/调度状态', ok,
+          f'rc={proc.returncode},detail={detail[:200]},stderr={proc.stderr[-200:]}')
+
+
+def test_refresh_notify():
     import configutil
     check('A05 默认路径与仓库一致',
           pathlib.Path(configutil.DEFAULT_CONFIG_DIR) == REPO / 'config'
@@ -594,7 +592,8 @@ def main():
     test_budget()
     test_portal()
     test_scheduler()
-    test_bootstrap_refresh()
+    test_multi_selftest()
+    test_refresh_notify()
     failed = [item for item in RESULTS if not item[1]]
     print(f'\n总计 {len(RESULTS)} 项，通过 {len(RESULTS) - len(failed)}，失败 {len(failed)}')
     if failed:

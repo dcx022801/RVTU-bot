@@ -1,11 +1,11 @@
-# RVTU-bot —— 日职打卡 + 校园网 Portal 认证（单容器，host 网络）
+# RVTU-bot —— 日职打卡 + 校园网 Portal 认证（多用户，单容器，host 网络）
 # 构建上下文为仓库根目录：
 #   docker build -f docker/Dockerfile -t rvtu-bot:latest .
 FROM rom3eur8hklqtwq0fa.xuanyuan.run/library/alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd
 
 # 关联 GitHub 仓库（ghcr 包页面显示与权限继承）
 LABEL org.opencontainers.image.source="https://github.com/dcx022801/RVTU-bot" \
-      org.opencontainers.image.description="RVTU-bot：日职打卡与校园网认证自动化（alpine 单容器）"
+      org.opencontainers.image.description="RVTU-bot：日职打卡与校园网认证自动化（多用户，alpine 单容器）"
 
 # apk 源换国内镜像（构建提速）
 RUN sed -i 's#://dl-cdn.alpinelinux.org#://mirrors.aliyun.com#g' /etc/apk/repositories \
@@ -14,31 +14,32 @@ RUN sed -i 's#://dl-cdn.alpinelinux.org#://mirrors.aliyun.com#g' /etc/apk/reposi
  && echo "Asia/Shanghai" > /etc/timezone \
  && addgroup -S rvtu \
  && adduser -S -D -H -G rvtu -h /app -s /sbin/nologin rvtu \
- && mkdir -p /state/logs /state/config \
+ && mkdir -p /state/logs /state/users /state/config \
  && chown -R rvtu:rvtu /state
 
 ENV TZ=Asia/Shanghai \
-    CONFIG_DIR=/state/config \
-    SOURCE_CONFIG_DIR=/config \
-    DEFAULTS_DIR=/defaults \
     STATE_DIR=/state \
+    RVTU_STATE_DIR=/state \
+    RVTU_USERS_DIR=/state/users \
+    RVTU_TEMPLATE_DIR=/defaults/user-template \
+    RVTU_WEB_PORT=11451 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# 配置三层：/config 用户参数（挂载后复制到 /state/config）、/defaults 程序参数、/state 运行态
+# 核心代码 + 共享默认值（含新用户模板）
 COPY app/ /app/
 COPY defaults/ /defaults/
 
-# Docker 专属入口与 .env 注入脚本放在 docker/，镜像内仍使用旧路径 /app/entrypoint.sh、/app/bootstrap.py
+# Docker 专属入口与兼容 sh 入口
 COPY docker/entrypoint.sh /app/entrypoint.sh
-COPY docker/bootstrap.py /app/bootstrap.py
 COPY docker/portal-auth.sh /app/scripts/portal-auth.sh
 
-# 入口以 root 启动，修正挂载目录权限后通过 su-exec 降权到 rvtu；
-# 实际业务进程（scheduler/打卡/Portal）以 UID 100（rvtu）运行。
 RUN chmod +x /app/entrypoint.sh /app/scripts/*.sh
+
+# Web 管理页（宿主机用 host 网络直连 11451）
+EXPOSE 11451
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
   CMD python3 -c "import os,sys,time; p='/state/heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 180 else 1)"

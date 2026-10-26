@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RVTU-bot 多用户管理</title>
+<style>
+  :root { --bg:#f5f7fb; --card:#fff; --line:#d9e0eb; --text:#1f2937; --muted:#667085; --brand:#1f7a4d; --danger:#b42318; --warn:#b54708; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"Microsoft YaHei UI","Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
+  .hidden { display:none !important; }
+  .wrap { max-width:1180px; margin:0 auto; padding:24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:22px; box-shadow:0 8px 24px rgba(16,24,40,.06); }
+  h1 { font-size:22px; margin:0; }
+  h2 { font-size:17px; margin:0 0 12px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .between { justify-content:space-between; }
+  button { border:1px solid var(--line); background:#fff; color:var(--text); border-radius:8px; padding:8px 12px; cursor:pointer; font-size:13px; }
+  button:hover { border-color:#98a2b3; }
+  button.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
+  button.danger { color:var(--danger); border-color:#f2b8b5; }
+  button.small { padding:5px 9px; font-size:12px; }
+  input, select, textarea { width:100%; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px; font-family:inherit; background:#fff; }
+  textarea { min-height:72px; resize:vertical; }
+  label { display:block; font-size:12px; color:var(--muted); margin:8px 0 4px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 18px; }
+  .grid.three { grid-template-columns:1fr 1fr 1fr; }
+  .span2 { grid-column:span 2; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:10px 8px; border-bottom:1px solid #edf1f7; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  .tag { display:inline-block; padding:2px 7px; border-radius:999px; font-size:11px; margin:1px 3px 1px 0; background:#eef4ff; color:#175cd3; }
+  .tag.ok { background:#e9f7ef; color:#067647; }
+  .tag.bad { background:#fef3f2; color:var(--danger); }
+  .tag.warn { background:#fffaeb; color:var(--warn); }
+  .login { max-width:420px; margin:12vh auto; }
+  .login h1 { margin-bottom:4px; }
+  .login .field { margin-top:14px; }
+  .error { color:var(--danger); font-size:12px; min-height:16px; margin-top:8px; }
+  .modal { position:fixed; inset:0; background:rgba(16,24,40,.45); display:flex; align-items:center; justify-content:center; padding:20px; z-index:20; }
+  .modal .panel { background:#fff; border-radius:12px; width:min(920px,96vw); max-height:90vh; overflow:auto; padding:22px; }
+  .modal .panel.small { width:min(560px,96vw); }
+  .actions { display:flex; gap:9px; justify-content:flex-end; margin-top:18px; }
+  .orders { background:#f8fafc; border:1px dashed var(--line); border-radius:10px; padding:10px 12px; margin:14px 0; font-size:13px; }
+  .orders b { color:var(--brand); }
+  pre { background:#0f172a; color:#d8e2f0; border-radius:10px; padding:14px; overflow:auto; max-height:56vh; font-size:12px; line-height:1.55; }
+  #toast { position:fixed; right:20px; bottom:20px; background:#101828; color:#fff; padding:11px 15px; border-radius:8px; font-size:13px; z-index:50; max-width:420px; }
+  .hint { color:var(--muted); font-size:12px; line-height:1.7; }
+  .warnbox { background:#fffaeb; border:1px solid #fedf89; color:#93370d; border-radius:8px; padding:9px 11px; font-size:12px; margin-top:12px; }
+  @media (max-width:760px) { .grid, .grid.three { grid-template-columns:1fr; } .span2 { grid-column:span 1; } .wrap { padding:12px; } }
+</style>
+</head>
+<body>
+<div id="loginView" class="wrap hidden">
+  <div class="card login">
+    <h1>RVTU-bot 多用户管理</h1>
+    <div class="muted">Docker Web 控制台 · 11451</div>
+    <div class="field"><label>管理员用户名</label><input id="loginUser" autocomplete="username"></div>
+    <div class="field"><label>管理员密码</label><input id="loginPass" type="password" autocomplete="current-password"></div>
+    <div class="error" id="loginError"></div>
+    <div class="actions"><button class="primary" id="loginBtn">登录</button></div>
+    <div class="warnbox">管理员账号仅在首次安装时打印到容器日志一次；丢失可删除 <code>/state/web-admin.json</code> 后重启容器。本页为 HTTP，请通过 HTTPS 反向代理或仅内网访问。</div>
+  </div>
+</div>
+
+<div id="appView" class="wrap hidden">
+  <div class="card">
+    <div class="row between">
+      <div>
+        <h1>RVTU-bot 多用户管理</h1>
+        <div class="muted" id="globalLine">加载中…</div>
+      </div>
+      <div class="row">
+        <span class="muted" id="who"></span>
+        <button id="refreshBtn">刷新</button>
+        <button id="logoutBtn">退出登录</button>
+      </div>
+    </div>
+    <div class="orders" id="ordersLine"></div>
+    <div class="row" style="margin-bottom:10px">
+      <button class="primary" id="addBtn">新增用户</button>
+      <span class="hint" id="hintLine">保存后约 5 秒内生效；所有启用用户按预检随机顺序、间隔 1~10 秒拉起。</span>
+    </div>
+    <div style="overflow:auto">
+      <table>
+        <thead><tr><th>用户</th><th>状态</th><th>今日任务</th><th>操作</th></tr></thead>
+        <tbody id="userRows"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div id="editorModal" class="modal hidden">
+  <div class="panel">
+    <h2 id="editorTitle">编辑用户</h2>
+    <div class="grid">
+      <div><label>用户名称</label><input id="editName"></div>
+      <div><label>用户标识（创建后不可改）</label><input id="editSlug" disabled></div>
+      <div><label>启用调度</label><label style="margin:0;color:var(--text)"><input type="checkbox" id="editEnabled" style="width:auto;margin-right:6px">启用</label></div>
+    </div>
+    <h2 style="margin-top:20px">登录凭据</h2>
+    <div class="grid">
+      <div><label>身份证号 / 账号</label><input id="credsUser"></div>
+      <div><label>统一密码</label><input id="credsPass"></div>
+    </div>
+    <h2 style="margin-top:20px">邮件通知（可留空）</h2>
+    <div class="grid three">
+      <div><label>SMTP 主机</label><input id="mailHost"></div>
+      <div><label>端口</label><input id="mailPort" value="465"></div>
+      <div><label>邮箱账号</label><input id="mailUser"></div>
+      <div><label>授权码</label><input id="mailPass"></div>
+      <div><label>发件邮箱</label><input id="mailSender"></div>
+      <div><label>收件邮箱（逗号分隔）</label><input id="mailTo"></div>
+    </div>
+    <h2 style="margin-top:20px">晚自习 / 定位</h2>
+    <div class="grid">
+      <div class="span2"><label>MAC 池（逗号或换行分隔）</label><textarea id="macsList"></textarea></div>
+      <div><label>纬度</label><input id="locLat"></div>
+      <div><label>经度</label><input id="locLon"></div>
+      <div class="span2"><label>地点描述</label><input id="locInfo"></div>
+    </div>
+    <h2 style="margin-top:20px">校园网 Portal</h2>
+    <div class="grid three">
+      <div><label>被认证网卡 MAC（umac）</label><input id="portalUmac"></div>
+      <div><label>上联设备 MAC</label><input id="portalUplink"></div>
+      <div><label>MAC 格式</label><select id="portalMacFormat"><option value="auto">auto</option><option value="colon">colon</option><option value="hyphen">hyphen</option></select></div>
+      <div class="span2"><label>允许提交凭据的门户主机（逗号分隔）</label><input id="portalHosts"></div>
+      <div><label>协议</label><input id="portalSchemes" value="https,http"></div>
+      <div><label>跳过白名单（不安全）</label><label style="margin:0;color:var(--text)"><input type="checkbox" id="portalAllowAny" style="width:auto;margin-right:6px">allowAny</label></div>
+    </div>
+    <div class="error" id="editorError"></div>
+    <div class="actions">
+      <button id="editorCancel">取消</button>
+      <button class="primary" id="editorSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="logsModal" class="modal hidden">
+  <div class="panel">
+    <div class="row between">
+      <h2 id="logsTitle">日志</h2>
+      <div class="row">
+        <select id="logFile" style="width:180px">
+          <option value="multi.log">multi.log</option>
+          <option value="checkin.log">checkin.log</option>
+          <option value="happy_checkin.log">happy_checkin.log</option>
+          <option value="portal-auth.log">portal-auth.log</option>
+          <option value="driver.log">driver.log</option>
+          <option value="notify.log">notify.log</option>
+        </select>
+        <button id="logLoad">加载</button>
+      </div>
+    </div>
+    <pre id="logContent">请选择日志并加载</pre>
+    <div class="actions"><button id="logsClose">关闭</button></div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let token = sessionStorage.getItem('rvtu_token') || '';
+let users = [];
+let currentSlug = '';
+
+function toast(message, ms = 3200) {
+  const el = $('toast');
+  el.textContent = message;
+  el.classList.remove('hidden');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => el.classList.add('hidden'), ms);
+}
+
+function showLogin(message = '') {
+  $('appView').classList.add('hidden');
+  $('loginView').classList.remove('hidden');
+  $('loginError').textContent = message;
+  $('loginUser').focus();
+}
+
+function showApp() {
+  $('loginView').classList.add('hidden');
+  $('appView').classList.remove('hidden');
+}
+
+async function api(path, options = {}) {
+  const headers = Object.assign({'Content-Type': 'application/json'}, options.headers || {});
+  if (token) headers.Authorization = 'Bearer ' + token;
+  const resp = await fetch(path, Object.assign({}, options, {headers}));
+  if (resp.status === 401 && !path.startsWith('/api/login')) {
+    token = '';
+    sessionStorage.removeItem('rvtu_token');
+    showLogin('会话已过期，请重新登录');
+    throw new Error('未登录');
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw Object.assign(new Error(data.error || resp.statusText), {data});
+  return data;
+}
+
+function fmtAge(sec) {
+  if (sec === null || sec === undefined) return '无心跳';
+  if (sec < 60) return sec + ' 秒前';
+  if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前';
+  return Math.floor(sec / 3600) + ' 小时前';
+}
+
+const STATUS = {
+  queued: '排队中', running: '执行中', done: '已完成',
+  retry_pending: '等待重试', failed: '失败', skipped: '已跳过'
+};
+
+function taskText(tasks) {
+  const parts = [];
+  for (const [key, label] of [['checkin', '考勤'], ['happy', '晚自习']]) {
+    const t = tasks[key];
+    parts.push(label + '：' + (t && t.status ? (STATUS[t.status] || t.status) : '待执行'));
+  }
+  return parts.join('；');
+}
+
+function render(data) {
+  users = data.users || [];
+  const hb = data.heartbeat_age;
+  $('globalLine').textContent = '全局心跳：' + fmtAge(hb) + ' · 日期：' + (data.date || '—') +
+    ' · 启用用户：' + users.filter(u => u.enabled).length + ' / ' + users.length;
+  const orders = data.orders || {};
+  const chunks = [];
+  for (const [key, label] of [['checkin', '宿舍考勤'], ['happy', '晚自习']]) {
+    const order = orders[key] || [];
+    if (order.length) chunks.push(label + '：' + order.map(s => `<b>${escapeHtml(s)}</b>`).join(' → '));
+  }
+  $('ordersLine').innerHTML = chunks.length ? ('今日预检顺序 · ' + chunks.join('　｜　')) : '今日预检顺序：尚未生成（打卡前 15 分钟随机决定）';
+  const tbody = $('userRows');
+  tbody.innerHTML = '';
+  if (!users.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4; td.className = 'muted'; td.textContent = '还没有用户，点“新增用户”创建。';
+    tr.appendChild(td); tbody.appendChild(tr);
+    return;
+  }
+  for (const u of users) {
+    const tr = document.createElement('tr');
+    const tdUser = document.createElement('td');
+    const name = document.createElement('div');
+    name.textContent = u.name;
+    const slug = document.createElement('div');
+    slug.className = 'muted'; slug.textContent = u.slug;
+    tdUser.append(name, slug);
+    const tdStatus = document.createElement('td');
+    const tags = [];
+    if (u.enabled) tags.push('<span class="tag ok">已启用</span>');
+    else tags.push('<span class="tag">已停用</span>');
+    if (u.errors && u.errors.length) tags.push('<span class="tag bad">配置错误</span>');
+    else if (u.warnings && u.warnings.length) tags.push('<span class="tag warn">提示</span>');
+    tags.push('<span class="tag">心跳 ' + fmtAge(u.heartbeat_age) + '</span>');
+    tdStatus.innerHTML = tags.join('');
+    if (u.errors && u.errors.length) {
+      const div = document.createElement('div');
+      div.className = 'muted'; div.style.marginTop = '5px';
+      div.textContent = u.errors.join('；');
+      tdStatus.appendChild(div);
+    }
+    const tdTasks = document.createElement('td');
+    tdTasks.textContent = taskText(u.tasks || {});
+    const tdOps = document.createElement('td');
+    const edit = button('编辑', () => openEditor(u.slug));
+    const toggle = button(u.enabled ? '停用' : '启用', () => toggleUser(u));
+    const logs = button('日志', () => openLogs(u.slug));
+    const del = button('删除', () => removeUser(u), 'danger small');
+    tdOps.append(edit, toggle, logs, del);
+    tr.append(tdUser, tdStatus, tdTasks, tdOps);
+    tbody.appendChild(tr);
+  }
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function button(text, handler, cls = 'small') {
+  const b = document.createElement('button');
+  b.className = cls;
+  b.textContent = text;
+  b.addEventListener('click', handler);
+  return b;
+}
+
+async function load() {
+  try {
+    const data = await api('/api/users');
+    showApp();
+    render(data);
+    try {
+      const me = await api('/api/me');
+      $('who').textContent = '管理员：' + me.username;
+    } catch (e) {}
+  } catch (e) {
+    if (token) toast(e.message);
+  }
+}
+
+async function login() {
+  const username = $('loginUser').value.trim();
+  const password = $('loginPass').value;
+  if (!username || !password) {
+    $('loginError').textContent = '请输入用户名和密码';
+    return;
+  }
+  try {
+    const data = await api('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({username, password})
+    });
+    token = data.token;
+    sessionStorage.setItem('rvtu_token', token);
+    $('loginPass').value = '';
+    $('loginError').textContent = '';
+    await load();
+  } catch (e) {
+    $('loginError').textContent = e.message;
+  }
+}
+
+async function logout() {
+  try { await api('/api/logout', {method: 'POST'}); } catch (e) {}
+  token = '';
+  sessionStorage.removeItem('rvtu_token');
+  showLogin();
+}
+
+async function toggleUser(u) {
+  try {
+    const data = await api('/api/users/' + encodeURIComponent(u.slug));
+    await api('/api/users/' + encodeURIComponent(u.slug), {
+      method: 'PUT',
+      body: JSON.stringify({name: data.name, enabled: !u.enabled, config: data.config})
+    });
+    toast(!u.enabled ? '已启用，约 5 秒内生效' : '已停用');
+    await load();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function removeUser(u) {
+  if (!confirm('删除用户 ' + u.name + '（' + u.slug + '）？配置会移入 .trash，可手动恢复。')) return;
+  try {
+    await api('/api/users/' + encodeURIComponent(u.slug), {method: 'DELETE'});
+    toast('已删除');
+    await load();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function fill(id, value) { $(id).value = value === null || value === undefined ? '' : value; }
+function value(id) { return $(id).value.trim(); }
+
+async function openEditor(slug) {
+  try {
+    const data = await api('/api/users/' + encodeURIComponent(slug));
+    currentSlug = slug;
+    const c = data.config || {};
+    const creds = c.creds || {}, mail = c.mail || {}, macs = c.macs || {};
+    const loc = c.location || {}, portal = c.portal || {};
+    $('editorTitle').textContent = '编辑用户 · ' + data.name;
+    fill('editName', data.name);
+    fill('editSlug', slug);
+    $('editEnabled').checked = !!data.enabled;
+    fill('credsUser', creds.user); fill('credsPass', creds.pass);
+    fill('mailHost', mail.host); fill('mailPort', mail.port || 465);
+    fill('mailUser', mail.user); fill('mailPass', mail.password);
+    fill('mailSender', mail.sender);
+    fill('mailTo', Array.isArray(mail.to) ? mail.to.join(',') : (mail.to || ''));
+    fill('macsList', Array.isArray(macs.macs) ? macs.macs.join(', ') : '');
+    fill('locLat', loc.latitude); fill('locLon', loc.longitude); fill('locInfo', loc.locationInfo);
+    fill('portalUmac', portal.umac); fill('portalUplink', portal.uplinkMac);
+    $('portalMacFormat').value = portal.macFormat || 'auto';
+    fill('portalHosts', Array.isArray(portal.allowedHosts) ? portal.allowedHosts.join(',') : '');
+    fill('portalSchemes', Array.isArray(portal.allowedSchemes) ? portal.allowedSchemes.join(',') : 'https,http');
+    $('portalAllowAny').checked = !!portal.allowAny;
+    $('editorError').textContent = (data.errors && data.errors.length) ? data.errors.join('；') : '';
+    $('editorModal').classList.remove('hidden');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function splitList(text) {
+  return String(text || '').split(/[\s,;]+/).filter(Boolean);
+}
+
+async function saveEditor() {
+  if (!currentSlug) return;
+  const mailFilled = ['mailHost','mailUser','mailPass','mailSender','mailTo'].some(id => value(id));
+  const config = {
+    creds: {user: value('credsUser'), pass: value('credsPass')},
+    mail: mailFilled ? {
+      host: value('mailHost'),
+      port: parseInt(value('mailPort') || '465', 10),
+      user: value('mailUser'),
+      password: value('mailPass'),
+      sender: value('mailSender'),
+      to: splitList(value('mailTo'))
+    } : {},
+    macs: {macs: splitList($('macsList').value)},
+    location: {
+      latitude: value('locLat'),
+      longitude: value('locLon'),
+      locationInfo: value('locInfo')
+    },
+    portal: {
+      umac: value('portalUmac'),
+      uplinkMac: value('portalUplink'),
+      allowedHosts: splitList(value('portalHosts')),
+      allowedSchemes: splitList(value('portalSchemes')) ,
+      allowAny: $('portalAllowAny').checked,
+      macFormat: $('portalMacFormat').value
+    }
+  };
+  try {
+    const data = await api('/api/users/' + encodeURIComponent(currentSlug), {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: value('editName'),
+        enabled: $('editEnabled').checked,
+        config
+      })
+    });
+    $('editorModal').classList.add('hidden');
+    toast(data.warnings && data.warnings.length ? ('已保存；提示：' + data.warnings.join('；')) : '已保存，约 5 秒内生效');
+    await load();
+  } catch (e) {
+    $('editorError').textContent = (e.data && e.data.errors ? e.data.errors.join('；') : e.message);
+  }
+}
+
+async function addUser() {
+  const name = prompt('新用户显示名称（例如：a / 张三）');
+  if (!name) return;
+  const slug = prompt('用户标识（小写字母/数字/下划线/连字符，可留空自动生成）', '');
+  if (slug === null) return;
+  try {
+    const data = await api('/api/users', {
+      method: 'POST',
+      body: JSON.stringify({name, slug: slug.trim() || null})
+    });
+    toast('已创建，请填写配置并启用');
+    await load();
+    await openEditor(data.slug);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function openLogs(slug) {
+  currentSlug = slug;
+  $('logsTitle').textContent = '日志 · ' + slug;
+  $('logContent').textContent = '加载中…';
+  $('logsModal').classList.remove('hidden');
+  loadLogs();
+}
+
+async function loadLogs() {
+  if (!currentSlug) return;
+  $('logContent').textContent = '加载中…';
+  try {
+    const file = $('logFile').value;
+    const data = await api('/api/logs/' + encodeURIComponent(currentSlug) +
+      '?file=' + encodeURIComponent(file) + '&lines=600');
+    $('logContent').textContent = data.content || '（空）';
+  } catch (e) {
+    $('logContent').textContent = '加载失败：' + e.message;
+  }
+}
+
+$('loginBtn').addEventListener('click', login);
+$('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+$('logoutBtn').addEventListener('click', logout);
+$('refreshBtn').addEventListener('click', load);
+$('addBtn').addEventListener('click', addUser);
+$('editorCancel').addEventListener('click', () => $('editorModal').classList.add('hidden'));
+$('editorSave').addEventListener('click', saveEditor);
+$('logsClose').addEventListener('click', () => $('logsModal').classList.add('hidden'));
+$('logLoad').addEventListener('click', loadLogs);
+$('logFile').addEventListener('change', loadLogs);
+
+if (token) load(); else showLogin();
+setInterval(() => { if (token && !$('appView').classList.contains('hidden')) load(); }, 5000);
+</script>
+</body>
+</html>

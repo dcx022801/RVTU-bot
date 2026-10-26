@@ -273,6 +273,17 @@ def load_schedule(path, required=False):
         result['_warnings'].append('schedule.portal.interval_minutes 小于 1，已按 1 处理')
         interval = 1
     result['portal'] = {'interval_minutes': interval}
+    multi = data.get('multi') or {}
+    gap_min = require_int(multi.get('launch_gap_min_sec', 1),
+                          'schedule.multi.launch_gap_min_sec', 0, 3600)
+    gap_max = require_int(multi.get('launch_gap_max_sec', 10),
+                          'schedule.multi.launch_gap_max_sec', 0, 3600)
+    if gap_max < gap_min:
+        result['_warnings'].append(
+            'schedule.multi.launch_gap_max_sec 小于 min，已按 min 处理')
+        gap_max = gap_min
+    result['multi'] = {'launch_gap_min_sec': gap_min,
+                       'launch_gap_max_sec': gap_max}
     return result
 
 

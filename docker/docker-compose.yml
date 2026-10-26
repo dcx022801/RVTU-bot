@@ -2,31 +2,31 @@ name: rvtu-bot
 
 services:
   rvtu-bot:
-    # 生产建议用 digest 固定：在 docker/.env 写 RVTU_IMAGE=ghcr.io/...@sha256:<digest>
+    # 生产建议用 digest 固定：可在 shell 设置 RVTU_IMAGE=ghcr.io/...@sha256:<digest>
     image: ${RVTU_IMAGE:-ghcr.io/dcx022801/rvtu-bot:latest}
     # 构建上下文是仓库根目录（本文件位于 docker/）
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: rvtu-bot
-    # host 网络：直读宿主机网口/网关信息，Portal 认证才能探测真实接口
+    # host 网络：Portal 认证需要直读宿主机网口；Web 管理页监听 11451
     network_mode: host
     restart: unless-stopped
     init: true                                 # 回收子进程
     environment:
       TZ: Asia/Shanghai
-      # 固定运行时配置路径，避免 .env 中的同名变量覆盖
-      CONFIG_DIR: /state/config
-      SOURCE_CONFIG_DIR: /config
-    env_file:
-      # .env 注入（可选）：存在 docker/.env 且填了 CREDS_USER 时启用，全部配置以 .env 为准
-      - path: .env
-        required: false
+      STATE_DIR: /state
+      RVTU_STATE_DIR: /state
+      RVTU_USERS_DIR: /state/users
+      RVTU_TEMPLATE_DIR: /defaults/user-template
+      RVTU_WEB_PORT: "11451"
+      # 旧版配置仅用于首次迁移：/state/config（旧 .env 输出）优先，其次 /config（挂载）
+      RVTU_LEGACY_CONFIG_DIRS: "/state/config;/config"
     volumes:
-      # 配置目录：默认仓库根目录 ./config；可用环境变量 CONFIG_DIR 指向别处
+      # 旧配置只读挂载；首次启动会迁移为 default 用户，之后由 Web 管理
       - ${CONFIG_DIR:-../config}:/config:ro
-      - ../defaults:/defaults:ro   # 程序参数（调度/探测点/接口地址，可改）
-      - ../state:/state            # 运行态（登录态/日志/调度状态，自动生成）
+      - ../defaults:/defaults:ro   # 程序参数 + 新用户模板（可改）
+      - ../state:/state            # ★ 持久化：管理员哈希、用户/凭据、会话、日志、调度状态
     read_only: true
     tmpfs:
       - /tmp:size=16m

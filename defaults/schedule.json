@@ -3,7 +3,8 @@
     "checkin / happy：两个打卡任务。hour/minute=每日触发时间；random_delay_sec_max=触发后随机延迟上限（秒）",
     "retry_after_min=打卡失败（退出码 2/3）后重试等待分钟数；notify_before_min=打卡前预检提前分钟数（0=关闭，或 >=6）",
     "打卡前预检：查询今日状态后按结果选择性发邮件——仅“待打卡”（发提醒）与“预检失败”（发提醒）两类，已打卡/非上课日静默",
-    "happy.budget_sec=晚自习打卡总执行预算（秒），默认 55；portal.interval_minutes=认证探测间隔分钟数"
+    "happy.budget_sec=晚自习打卡总执行预算（秒），默认 55；portal.interval_minutes=认证探测间隔分钟数",
+    "multi.launch_gap_min_sec / launch_gap_max_sec：多用户模式下同一任务相邻用户启动间隔（秒），默认 1~10"
   ],
   "checkin": {
     "hour": 21,
@@ -22,5 +23,9 @@
   },
   "portal": {
     "interval_minutes": 1
+  },
+  "multi": {
+    "launch_gap_min_sec": 1,
+    "launch_gap_max_sec": 10
   }
 }

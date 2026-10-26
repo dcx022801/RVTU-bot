@@ -21,7 +21,6 @@ import datetime
 import json
 import os
 import queue
-import shutil
 import signal
 import subprocess
 import sys
@@ -39,13 +38,9 @@ RESOURCE_ROOT = (Path(getattr(sys, '_MEIPASS', DATA_ROOT))
 ROOT = DATA_ROOT
 APP_DIR = RESOURCE_ROOT / 'app'
 SCRIPTS_DIR = APP_DIR / 'scripts'
-TEMPLATE_CONFIG_DIR = RESOURCE_ROOT / 'config'
 STATE_DIR = Path(os.environ.get('RVTU_STATE_DIR')
                  or os.environ.get('STATE_DIR')
                  or (DATA_ROOT / 'state')).expanduser()
-CONFIG_DIR = Path(os.environ.get('RVTU_CONFIG_DIR')
-                  or os.environ.get('CONFIG_DIR')
-                  or (STATE_DIR / 'config')).expanduser()
 _DEFAULTS_ROOT = RESOURCE_ROOT if FROZEN else DATA_ROOT
 DEFAULTS_DIR = Path(os.environ.get('RVTU_DEFAULTS_DIR')
                     or os.environ.get('DEFAULTS_DIR')
@@ -57,15 +52,23 @@ VENV_PYTHON = (None if FROZEN
                else DATA_ROOT / 'win' / '.venv' / 'Scripts' / 'python.exe')
 VENV_PYTHONW = (None if FROZEN
                 else DATA_ROOT / 'win' / '.venv' / 'Scripts' / 'pythonw.exe')
-# Windows 默认使用 state/config（已被 .gitignore 忽略），避免把真实凭据写进被跟踪的 config/ 模板
-SEED_CONFIG = CONFIG_DIR == (STATE_DIR / 'config')
+MULTI_STATE_PATH = STATE_DIR / 'multi_state.json'
 
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from configutil import (ConfigError, load_api, load_creds, load_location,
-                        load_macs, load_mail, load_portal, load_schedule)
+# profiles 在导入时确定持久化路径；必须先注入本 GUI 的路径
+os.environ.setdefault('RVTU_STATE_DIR', str(STATE_DIR))
+os.environ.setdefault('RVTU_USERS_DIR', str(STATE_DIR / 'users'))
+os.environ.setdefault('RVTU_TEMPLATE_DIR',
+                      str(RESOURCE_ROOT / 'defaults' / 'user-template'))
+
+from configutil import ConfigError, load_api, load_schedule
 from logutil import append_log
+import profiles
+from profile_dialog import ProfileManager
+
+USERS_DIR = profiles.USERS_DIR
 
 AUTOSTART_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 AUTOSTART_NAME = 'RVTU-bot'
@@ -74,6 +77,7 @@ FONT = 'Microsoft YaHei UI'
 STATUS_TEXT = {
     '': '待执行',
     'running': '执行中',
+    'queued': '排队中',
     'done': '已完成',
     'retry_pending': '等待重试',
     'failed': '失败',
@@ -161,10 +165,10 @@ def scheduler_python() -> str:
 
 
 def scheduler_command() -> list:
-    """GUI 启动调度器的命令：源码模式用 Python，exe 模式用自身分发参数。"""
+    """GUI 启动多用户调度器：源码模式用 Python，exe 模式用自身分发参数。"""
     if FROZEN:
-        return [sys.executable, '--run-scheduler']
-    return [scheduler_python(), '-u', str(APP_DIR / 'scheduler.py')]
+        return [sys.executable, '--run-multi']
+    return [scheduler_python(), '-u', str(APP_DIR / 'multi_scheduler.py')]
 
 
 def load_json(path: Path) -> dict:
@@ -195,8 +199,8 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
-def pid_is_scheduler(pid: int) -> bool:
-    """确认 PID 对应的命令行确实是 scheduler.py，避免误杀复用的 PID。"""
+def pid_is_scheduler(pid: int, needles=('multi_scheduler.py', '--run-multi')) -> bool:
+    """确认 PID 对应的命令行确实是本项目的调度器，避免误杀复用的 PID。"""
     if os.name == 'nt':
         try:
             command = (f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\")"
@@ -206,15 +210,16 @@ def pid_is_scheduler(pid: int) -> bool:
                 capture_output=True, text=True, timeout=8,
                 creationflags=CREATE_NO_WINDOW,
             )
-            return 'scheduler.py' in (result.stdout or '')
+            text = result.stdout or ''
+            return any(item in text for item in needles)
         except Exception:
             return False
     try:
         raw = Path(f'/proc/{pid}/cmdline').read_bytes()
-        return 'scheduler.py' in raw.replace(b'\0', b' ').decode('utf-8', 'ignore')
+        text = raw.replace(b'\0', b' ').decode('utf-8', 'ignore')
+        return any(item in text for item in needles)
     except Exception:
         return False
-
 
 def kill_tree(pid: int) -> None:
     if pid <= 0:
@@ -304,6 +309,12 @@ class RvtuApp:
         self.heartbeat_var = tk.StringVar(value='心跳：无')
         self.task_vars = {name: tk.StringVar(value='读取中…')
                           for name in ('checkin', 'happy', 'portal')}
+        self.orders_var = tk.StringVar(value='今日顺序：—')
+        self._profiles = []
+        self._profiles_by_slug = {}
+        self._profile_display = {}
+        self._current_slug = ''
+        self._manager = None
         self.autostart_var = tk.BooleanVar(value=autostart_enabled())
 
         self._build_ui()
@@ -316,11 +327,11 @@ class RvtuApp:
 
     def _build_ui(self) -> None:
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(3, weight=1)
+        self.root.rowconfigure(4, weight=1)
 
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label='打开配置目录', command=self.open_config_dir)
+        file_menu.add_command(label='打开用户配置', command=self.open_config_dir)
         file_menu.add_command(label='打开日志目录', command=self.open_log_dir)
         file_menu.add_separator()
         file_menu.add_command(label='隐藏到系统托盘', command=self.hide_to_tray)
@@ -353,22 +364,34 @@ class RvtuApp:
         ttk.Button(toolbar, text='启动调度', command=self.start_scheduler).pack(side='left')
         ttk.Button(toolbar, text='停止调度', command=self.stop_scheduler).pack(side='left', padx=(8, 0))
         ttk.Button(toolbar, text='重启调度', command=self.restart_scheduler).pack(side='left', padx=(8, 0))
-        ttk.Button(toolbar, text='检查配置', command=self.check_config_ui).pack(side='left', padx=(8, 0))
         ttk.Button(toolbar, text='隐藏到托盘', command=self.hide_to_tray).pack(side='right')
 
+        userbar = ttk.Frame(self.root, padding=(14, 0, 14, 8))
+        userbar.grid(row=2, column=0, sticky='ew')
+        ttk.Label(userbar, text='用户：').pack(side='left')
+        self.profile_combo = ttk.Combobox(userbar, state='readonly', width=30)
+        self.profile_combo.pack(side='left', padx=(0, 8))
+        self.profile_combo.bind('<<ComboboxSelected>>', self._on_profile_selected)
+        ttk.Button(userbar, text='用户管理', command=self.open_profiles).pack(side='left')
+        ttk.Button(userbar, text='打开用户日志',
+                   command=self.open_profile_logs).pack(side='left', padx=(8, 0))
+        ttk.Button(userbar, text='检查配置', command=self.check_config_ui).pack(side='left', padx=(8, 0))
+
         info = ttk.LabelFrame(self.root, text='运行状态', padding=10)
-        info.grid(row=2, column=0, sticky='ew', padx=14, pady=(0, 8))
+        info.grid(row=3, column=0, sticky='ew', padx=14, pady=(0, 8))
         info.columnconfigure(0, weight=1)
         for row, name in enumerate(('checkin', 'happy', 'portal')):
             ttk.Label(info, textvariable=self.task_vars[name],
                       font=(FONT, 10)).grid(row=row, column=0, columnspan=2, sticky='w', pady=2)
+        ttk.Label(info, textvariable=self.orders_var,
+                  font=(FONT, 9)).grid(row=3, column=0, columnspan=2, sticky='w', pady=(4, 0))
         ttk.Label(info, textvariable=self.heartbeat_var,
-                  font=(FONT, 9)).grid(row=3, column=0, sticky='w', pady=(6, 0))
+                  font=(FONT, 9)).grid(row=4, column=0, sticky='w', pady=(6, 0))
         ttk.Label(info, textvariable=self.clock_var,
-                  font=(FONT, 9)).grid(row=3, column=1, sticky='e', pady=(6, 0))
+                  font=(FONT, 9)).grid(row=4, column=1, sticky='e', pady=(6, 0))
 
         log_frame = ttk.LabelFrame(self.root, text='运行日志', padding=8)
-        log_frame.grid(row=3, column=0, sticky='nsew', padx=14, pady=(0, 8))
+        log_frame.grid(row=4, column=0, sticky='nsew', padx=14, pady=(0, 8))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, height=14, wrap='word', state='disabled',
@@ -380,10 +403,10 @@ class RvtuApp:
         scroll.grid(row=0, column=1, sticky='ns')
 
         footer = ttk.Frame(self.root, padding=(14, 0, 14, 12))
-        footer.grid(row=4, column=0, sticky='ew')
+        footer.grid(row=5, column=0, sticky='ew')
         ttk.Checkbutton(footer, text='开机自启', variable=self.autostart_var,
                         command=self._toggle_autostart).pack(side='left')
-        ttk.Button(footer, text='打开配置目录',
+        ttk.Button(footer, text='打开用户配置',
                    command=self.open_config_dir).pack(side='left', padx=(18, 0))
         ttk.Button(footer, text='打开日志目录',
                    command=self.open_log_dir).pack(side='left', padx=(8, 0))
@@ -411,29 +434,86 @@ class RvtuApp:
         y = max(0, (screen_h - height) // 2)
         self.root.geometry(f'{width}x{height}+{x}+{y}')
 
-    def _ensure_config_dir(self) -> None:
+    def _ensure_profiles(self) -> None:
         try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            if not SEED_CONFIG:
-                return
-            for name in ('creds.json', 'mail.json', 'macs.json',
-                         'location.json', 'portal.json'):
-                target = CONFIG_DIR / name
-                source = TEMPLATE_CONFIG_DIR / name
-                if not target.exists() and source.exists():
-                    shutil.copyfile(source, target)
+            result = profiles.ensure_default_profile()
+            if result:
+                profile, source = result
+                note = f'（迁移自 {source}）' if source else '（模板，未启用）'
+                self._emit(f'[GUI] 已初始化默认用户：{profile["slug"]}{note}',
+                           persist=True)
         except Exception as exc:
-            self._emit(f'[GUI] 初始化配置目录失败：{exc}', persist=True)
+            self._emit(f'[GUI] 初始化用户失败：{exc}', persist=True)
+
+    def _profiles_changed(self) -> None:
+        self._refresh_profiles()
+        self._refresh_view()
+
+    def _on_profile_selected(self, _event=None) -> None:
+        self._current_slug = self.selected_slug()
+        self._refresh_view()
+
+    def selected_slug(self) -> str:
+        if self._current_slug and self._current_slug in self._profiles_by_slug:
+            return self._current_slug
+        text = self.profile_combo.get().strip()
+        return self._profile_display.get(text, '')
+
+    def _refresh_profiles(self) -> None:
+        try:
+            items = profiles.list_profiles(validate=True)
+        except Exception as exc:
+            self._emit(f'[GUI] 读取用户失败：{exc}', persist=True)
+            items = []
+        self._profiles = items
+        self._profiles_by_slug = {p['slug']: p for p in items}
+        display = {f'{p["name"]}（{p["slug"]}）': p['slug'] for p in items}
+        self._profile_display = display
+        selected = self.selected_slug()
+        values = list(display.keys())
+        if values != list(self.profile_combo['values']):
+            self.profile_combo['values'] = values
+        if selected and selected in self._profiles_by_slug:
+            self._current_slug = selected
+            for label, slug in display.items():
+                if slug == selected:
+                    self.profile_combo.set(label)
+                    break
+        elif items:
+            self._current_slug = display[values[0]]
+            self.profile_combo.set(values[0])
+        else:
+            self._current_slug = ''
+            self.profile_combo.set('')
+
+    def open_profiles(self) -> None:
+        if self._manager is not None:
+            try:
+                if self._manager.winfo_exists():
+                    self._manager.lift()
+                    return
+            except Exception:
+                pass
+        self._manager = ProfileManager(self.root, on_change=self._profiles_changed)
+
+    def open_profile_logs(self) -> None:
+        slug = self.selected_slug()
+        if slug and slug in self._profiles_by_slug:
+            path = Path(self._profiles_by_slug[slug]['state_dir']) / 'logs'
+            self._open_dir(path, f'用户 {slug} 日志')
+        else:
+            self._open_dir(LOG_DIR, '全局日志目录')
 
     def _bootstrap(self) -> None:
-        self._ensure_config_dir()
+        self._ensure_profiles()
         self._init_tray()
         if self.autostart_mode and not self.icon:
             self.show_window()
         self._load_recent_log()
-        self._emit('[GUI] RVTU-bot Windows 版已启动', persist=True)
+        self._emit('[GUI] RVTU-bot Windows 多用户版已启动', persist=True)
+        self._refresh_profiles()
         self._refresh_view()
-        self.start_scheduler(interactive=not self.autostart_mode)
+        self.start_scheduler()
         self.root.after(500, self._periodic)
 
     def _init_tray(self) -> None:
@@ -491,7 +571,7 @@ class RvtuApp:
             pass
 
     def _load_recent_log(self) -> None:
-        path = DRIVER_LOG if FROZEN else LOG_DIR / 'scheduler.log'
+        path = DRIVER_LOG if FROZEN else LOG_DIR / 'multi.log'
         try:
             text = path.read_text(encoding='utf-8', errors='replace')
             for line in text.splitlines()[-200:]:
@@ -610,63 +690,55 @@ class RvtuApp:
     def _cleanup_orphan(self) -> None:
         if self.is_running():
             return
-        path = STATE_DIR / 'scheduler.pid'
-        try:
-            pid = int(path.read_text(encoding='utf-8').strip())
-        except Exception:
-            return
-        if pid <= 0 or pid == os.getpid() or not pid_alive(pid):
+        candidates = (
+            (STATE_DIR / 'multi.pid', ('multi_scheduler.py', '--run-multi'),
+             '多用户调度器'),
+            (STATE_DIR / 'scheduler.pid', ('scheduler.py', '--run-scheduler'),
+             '旧版调度器'),
+        )
+        for path, needles, label in candidates:
             try:
-                path.unlink()
+                pid = int(path.read_text(encoding='utf-8').strip())
             except Exception:
-                pass
-            return
-        if not pid_is_scheduler(pid):
-            self._emit(f'[GUI] scheduler.pid 指向的进程 {pid} 不是调度器，忽略该文件',
+                continue
+            if pid <= 0 or pid == os.getpid() or not pid_alive(pid):
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+                continue
+            if not pid_is_scheduler(pid, needles):
+                self._emit(f'[GUI] {path.name} 指向的进程 {pid} 不是{label}，忽略该文件',
+                           persist=True)
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+                continue
+            self._emit(f'[GUI] 发现未接管的{label}（PID {pid}），正在停止...',
                        persist=True)
+            kill_tree(pid)
+            for _ in range(30):
+                if not pid_alive(pid):
+                    break
+                time.sleep(0.1)
             try:
                 path.unlink()
             except Exception:
                 pass
-            return
-        self._emit(f'[GUI] 发现未接管的调度器（PID {pid}），正在停止...', persist=True)
-        kill_tree(pid)
-        for _ in range(30):
-            if not pid_alive(pid):
-                break
-            time.sleep(0.1)
-        try:
-            path.unlink()
-        except Exception:
-            pass
 
-    def start_scheduler(self, interactive: bool = True) -> None:
+    def start_scheduler(self) -> None:
         if self._quitting:
             return
         if self.is_running():
-            self._emit('[GUI] 调度器已在运行')
+            self._emit('[GUI] 多用户调度器已在运行')
             return
         if self.proc is not None:
             self._emit(f'[GUI] 上次调度器已退出（退出码 {self.proc.returncode}）',
                        persist=True)
             self.proc = None
+        self._ensure_profiles()
         self._cleanup_orphan()
-
-        errors, warnings = self._check_config()
-        for warning in warnings:
-            self._emit(f'[GUI] 配置提示：{warning}', persist=True)
-        if errors:
-            for error in errors:
-                self._emit(f'[GUI] 配置错误：{error}', persist=True)
-            if not interactive:
-                self._emit('[GUI] 配置未通过校验，调度器未启动', persist=True)
-                return
-            detail = '\n'.join(errors[:8])
-            if not messagebox.askyesno(
-                    '配置未完成',
-                    f'以下配置存在问题：\n\n{detail}\n\n仍要启动调度器吗？',
-                    parent=self.root):
-                return
 
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -678,9 +750,11 @@ class RvtuApp:
                     pass
             env = os.environ.copy()
             env.update({
-                'CONFIG_DIR': str(CONFIG_DIR),
-                'DEFAULTS_DIR': str(DEFAULTS_DIR),
+                'RVTU_STATE_DIR': str(STATE_DIR),
                 'STATE_DIR': str(STATE_DIR),
+                'RVTU_USERS_DIR': str(USERS_DIR),
+                'RVTU_TEMPLATE_DIR': str(profiles.TEMPLATE_DIR),
+                'DEFAULTS_DIR': str(DEFAULTS_DIR),
                 'PYTHONIOENCODING': 'utf-8',
                 'PYTHONUNBUFFERED': '1',
                 'PYTHONUTF8': '1',
@@ -694,25 +768,26 @@ class RvtuApp:
                 creationflags=CREATE_NO_WINDOW,
             )
         except Exception as exc:
-            self._emit(f'[GUI] 启动调度器失败：{exc}', persist=True)
-            if interactive:
+            self._emit(f'[GUI] 启动多用户调度器失败：{exc}', persist=True)
+            if not self.autostart_mode:
                 messagebox.showerror('启动失败', str(exc), parent=self.root)
             return
 
-        self._emit(f'[GUI] 调度器已启动（PID {self.proc.pid}）', persist=True)
+        self._emit(f'[GUI] 多用户调度器已启动（PID {self.proc.pid}）', persist=True)
         threading.Thread(target=self._pump_output, args=(self.proc,), daemon=True).start()
+        self._refresh_profiles()
         self._refresh_view()
 
     def stop_scheduler(self) -> None:
         proc = self.proc
         self.proc = None
         if proc is None:
-            self._emit('[GUI] 调度器未运行')
+            self._emit('[GUI] 多用户调度器未运行')
         else:
             if proc.poll() is not None:
                 self._emit(f'[GUI] 调度器已退出（退出码 {proc.returncode}）', persist=True)
             else:
-                self._emit(f'[GUI] 正在停止调度器（PID {proc.pid}）...', persist=True)
+                self._emit(f'[GUI] 正在停止多用户调度器（PID {proc.pid}）...', persist=True)
                 kill_tree(proc.pid)
                 try:
                     proc.wait(timeout=8)
@@ -721,12 +796,12 @@ class RvtuApp:
                         proc.kill()
                     except Exception:
                         pass
-                self._emit('[GUI] 调度器已停止', persist=True)
-            try:
-                (STATE_DIR / 'scheduler.pid').unlink()
-            except Exception:
-                pass
-        self._refresh_view()
+                self._emit('[GUI] 多用户调度器已停止', persist=True)
+            for pid_name in ('multi.pid', 'scheduler.pid'):
+                try:
+                    (STATE_DIR / pid_name).unlink()
+                except Exception:
+                    pass
 
     def restart_scheduler(self) -> None:
         self.stop_scheduler()
@@ -735,56 +810,49 @@ class RvtuApp:
     def _check_config(self):
         errors = []
         warnings = []
+        slug = self.selected_slug()
+        if not slug:
+            return ['没有选择用户'], []
         try:
-            load_creds(str(CONFIG_DIR / 'creds.json'))
+            info = profiles.get_profile(slug, validate=True)
+            errors.extend(info['errors'])
+            warnings.extend(info['warnings'])
         except Exception as exc:
-            errors.append(f'creds.json：{exc}')
-        try:
-            load_macs(str(CONFIG_DIR / 'macs.json'))
-        except Exception as exc:
-            errors.append(f'macs.json：{exc}')
-        try:
-            load_location(str(CONFIG_DIR / 'location.json'))
-        except Exception as exc:
-            errors.append(f'location.json：{exc}')
+            errors.append(str(exc))
         try:
             sched = load_schedule(str(DEFAULTS_DIR / 'schedule.json'), required=True)
             load_api(str(DEFAULTS_DIR / 'api.json'), required=True)
-            for warning in sched.get('_warnings', []):
-                warnings.append(warning)
+            warnings.extend(sched.get('_warnings', []))
         except Exception as exc:
             errors.append(f'defaults：{exc}')
-        try:
-            portal = load_portal(str(CONFIG_DIR / 'portal.json'))
-            if not portal['allowedHosts'] and not portal['allowAny']:
-                warnings.append('portal.allowedHosts 为空，校园网认证会拒绝提交凭据'
-                                '（fail-closed）')
-        except Exception as exc:
-            errors.append(f'portal.json：{exc}')
-        try:
-            mail = load_mail(str(CONFIG_DIR / 'mail.json'))
-            if mail is None:
-                warnings.append('未启用邮件通知（mail.json 为空或仍是占位符）')
-        except Exception as exc:
-            warnings.append(f'邮件配置无效：{exc}')
         return errors, warnings
 
     def check_config_ui(self) -> None:
+        self._refresh_profiles()
+        slug = self.selected_slug()
+        if not slug:
+            messagebox.showwarning('配置检查', '还没有用户，请先在“用户管理”中创建。',
+                                   parent=self.root)
+            return
         errors, warnings = self._check_config()
         for error in errors:
-            self._emit(f'[GUI] 配置错误：{error}', persist=True)
+            self._emit(f'[GUI] {slug} 配置错误：{error}', persist=True)
         for warning in warnings:
-            self._emit(f'[GUI] 配置提示：{warning}', persist=True)
+            self._emit(f'[GUI] {slug} 配置提示：{warning}', persist=True)
+        nl = chr(10)
         if errors:
-            text = '发现以下错误：\n\n' + '\n'.join(f'· {item}' for item in errors)
+            text = '发现以下错误：' + nl * 2 + nl.join(f'· {item}' for item in errors)
             if warnings:
-                text += '\n\n提示：\n\n' + '\n'.join(f'· {item}' for item in warnings)
-            messagebox.showerror('配置检查', text, parent=self.root)
+                text += nl * 2 + '提示：' + nl * 2 + nl.join(
+                    f'· {item}' for item in warnings)
+            messagebox.showerror(f'配置检查 · {slug}', text, parent=self.root)
         elif warnings:
-            text = '配置可用，但有以下提示：\n\n' + '\n'.join(f'· {item}' for item in warnings)
-            messagebox.showwarning('配置检查', text, parent=self.root)
+            text = '配置可用，但有以下提示：' + nl * 2 + nl.join(
+                f'· {item}' for item in warnings)
+            messagebox.showwarning(f'配置检查 · {slug}', text, parent=self.root)
         else:
-            messagebox.showinfo('配置检查', '配置检查通过。', parent=self.root)
+            messagebox.showinfo(f'配置检查 · {slug}', '配置检查通过。',
+                                parent=self.root)
 
     def _refresh_view(self) -> None:
         if self._quitting:
@@ -793,49 +861,93 @@ class RvtuApp:
         if proc is not None and proc.poll() is not None:
             code = proc.returncode
             self.proc = None
-            self._emit(f'[GUI] 调度器已退出（退出码 {code}）', persist=True)
+            self._emit(f'[GUI] 多用户调度器已退出（退出码 {code}）', persist=True)
 
+        self._refresh_profiles()
         running = self.is_running()
+        profiles_list = self._profiles
+        enabled = [p for p in profiles_list if p['enabled']]
+        config_errors = sum(1 for p in profiles_list
+                            if p['enabled'] and p['errors'])
         if running:
-            self.status_var.set(f'调度器：运行中（PID {self.proc.pid}）')
+            if not profiles_list:
+                status = '多用户调度器：运行中（尚无用户）'
+            else:
+                status = (f'多用户调度器：运行中（{len(enabled)}/{len(profiles_list)} 启用）')
+                if config_errors:
+                    status += f'｜配置错误 {config_errors}'
             self.status_label.configure(fg='#1a7f37')
         else:
-            self.status_var.set('调度器：已停止')
+            status = '多用户调度器：已停止'
             self.status_label.configure(fg='#a40e26')
+        self.status_var.set(status)
 
+        state = load_json(MULTI_STATE_PATH)
         today = datetime.date.today().isoformat()
-        state = load_json(STATE_DIR / 'scheduler_state.json')
-        tasks = state.get('tasks') if state.get('date') == today else {}
-        if not isinstance(tasks, dict):
-            tasks = {}
+        all_tasks = state.get('tasks') if state.get('date') == today else {}
+        if not isinstance(all_tasks, dict):
+            all_tasks = {}
+        orders = state.get('orders') or {}
+        heartbeats = state.get('heartbeats') or {}
+        slug = self.selected_slug()
 
         try:
             sched = load_schedule(str(DEFAULTS_DIR / 'schedule.json'), required=True)
         except ConfigError:
             sched = None
 
-        if sched:
-            for name, label in (('checkin', '宿舍考勤'), ('happy', '晚自习')):
-                item = sched[name]
-                current = tasks.get(name) or {}
-                status = STATUS_TEXT.get(current.get('status') or '', '待执行')
-                self.task_vars[name].set(
-                    f'{label}  {item["hour"]:02d}:{item["minute"]:02d}  ·  {status}')
-            interval = sched['portal']['interval_minutes']
-            self.task_vars['portal'].set(
-                f'校园网认证  每 {interval} 分钟  ·  '
-                + ('随调度运行' if running else '调度已停止'))
-        else:
+        if not slug:
             for name in self.task_vars:
-                self.task_vars[name].set('调度配置不可用')
-
-        try:
-            age = max(0, int(time.time() - (STATE_DIR / 'heartbeat').stat().st_mtime))
-            heartbeat = f'心跳：{age} 秒前'
-            if running and age > 180:
-                heartbeat += '（异常）'
-        except Exception:
+                self.task_vars[name].set('未选择用户 · 请打开“用户管理”创建')
             heartbeat = '心跳：无'
+        else:
+            info = self._profiles_by_slug.get(slug) or {}
+            tasks = (all_tasks or {}).get(slug) or {}
+            if sched:
+                for name, label in (('checkin', '宿舍考勤'), ('happy', '晚自习')):
+                    item = sched[name]
+                    current = tasks.get(name) or {}
+                    status = STATUS_TEXT.get(current.get('status') or '', '待执行')
+                    suffix = '（配置错误）' if info.get('errors') else ''
+                    self.task_vars[name].set(
+                        f'{label}  {item["hour"]:02d}:{item["minute"]:02d}  ·  {status}{suffix}')
+                interval = sched['portal']['interval_minutes']
+                if info.get('errors'):
+                    portal_status = '配置错误'
+                elif not info.get('enabled', False):
+                    portal_status = '已停用'
+                else:
+                    portal_status = '随调度运行' if running else '调度已停止'
+                self.task_vars['portal'].set(
+                    f'校园网认证  每 {interval} 分钟  ·  {portal_status}')
+            else:
+                for name in self.task_vars:
+                    self.task_vars[name].set('调度配置不可用')
+            hb = heartbeats.get(slug)
+            if hb:
+                age = max(0, int(time.time() - float(hb)))
+                heartbeat = f'心跳：{age} 秒前'
+                if running and age > 180:
+                    heartbeat += '（异常）'
+            else:
+                heartbeat = '心跳：无'
+            if info.get('errors'):
+                heartbeat += '｜配置错误'
+
+        bits = []
+        for key, label in (('checkin', '宿舍考勤'), ('happy', '晚自习')):
+            order = orders.get(key) or []
+            if order:
+                names = []
+                for s in order:
+                    item = self._profiles_by_slug.get(s) or {}
+                    names.append(item.get('name') or s)
+                bits.append(f'{label}：' + ' → '.join(names))
+        if bits:
+            self.orders_var.set('今日顺序 · ' + ' ｜ '.join(bits))
+        else:
+            self.orders_var.set('今日顺序：尚未生成（打卡前 15 分钟随机决定）')
+
         self.heartbeat_var.set(heartbeat)
         self.clock_var.set(datetime.datetime.now().strftime('当前时间：%Y-%m-%d %H:%M:%S'))
         self._refresh_tray_state(running)
@@ -883,7 +995,12 @@ class RvtuApp:
                 pass
 
     def open_config_dir(self) -> None:
-        self._open_dir(CONFIG_DIR, '配置目录')
+        slug = self.selected_slug()
+        if slug and slug in self._profiles_by_slug:
+            self._open_dir(Path(self._profiles_by_slug[slug]['config_dir']),
+                           f'用户 {slug} 配置')
+        else:
+            self._open_dir(USERS_DIR, '用户配置根目录')
 
     def open_log_dir(self) -> None:
         self._open_dir(LOG_DIR, '日志目录')
@@ -910,7 +1027,7 @@ class RvtuApp:
         messagebox.showinfo(
             '关于 RVTU-bot',
             f'RVTU-bot Windows 控制台\n\n'
-            f'项目目录：{ROOT}\n配置目录：{CONFIG_DIR}\n状态目录：{STATE_DIR}\n\n'
+            f'项目目录：{ROOT}\n用户根目录：{USERS_DIR}\n状态目录：{STATE_DIR}\n\n'
             f'关闭窗口会最小化到系统托盘；退出请使用托盘菜单或“退出程序”。',
             parent=self.root)
 
@@ -977,7 +1094,7 @@ def _redirect_driver_output():
 
 
 def run_scheduler_mode() -> int:
-    """exe 模式：在后台调度器进程中运行 app/scheduler.py。"""
+    """exe 模式：在后台调度器进程中运行 app/scheduler.py（兼容单用户）。"""
     _redirect_driver_output()
     for path in (str(APP_DIR), str(SCRIPTS_DIR)):
         if path not in sys.path:
@@ -990,6 +1107,29 @@ def run_scheduler_mode() -> int:
         return 1
     try:
         return int(scheduler.main() or 0)
+    except SystemExit as exc:
+        code = exc.code
+        return 0 if code is None else int(code) if isinstance(code, int) else 1
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+def run_multi_mode() -> int:
+    """exe 模式：运行 app/multi_scheduler.py（多用户）。"""
+    _redirect_driver_output()
+    for path in (str(APP_DIR), str(SCRIPTS_DIR)):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    try:
+        import multi_scheduler
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return 1
+    try:
+        return int(multi_scheduler.main() or 0)
     except SystemExit as exc:
         code = exc.code
         return 0 if code is None else int(code) if isinstance(code, int) else 1
@@ -1035,6 +1175,8 @@ def run_core_mode() -> int:
 
 
 def main() -> int:
+    if '--run-multi' in sys.argv:
+        return run_multi_mode()
     if '--run-scheduler' in sys.argv:
         return run_scheduler_mode()
     if '--run-core' in sys.argv:
