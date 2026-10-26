@@ -14,19 +14,35 @@
 
 ## Docker 部署
 
-要求：x86_64 Linux、Docker、Compose ≥ 2.24（host 网络）。
+要求：x86_64 Linux、Docker（compose 方式需 Compose ≥ 2.24，host 网络）。
+
+镜像已公开：`ghcr.io/dcx022801/rvtu-bot:latest`，可直接拉取，无需登录。
+
+### 方式一：compose（推荐）
 
 ```sh
-git clone git@github.com:dcx022801/RVTU-bot.git
+git clone https://github.com/dcx022801/RVTU-bot.git
 cd RVTU-bot/docker
 docker compose pull
 docker compose up -d
 docker logs rvtu-bot | grep -A5 'Web 管理员'
 ```
 
-首次启动会在日志中打印一次性管理员账号，然后访问 `http://<服务器IP>:11451` 登录，添加用户并启用。
+compose 默认 `image` 就是 `ghcr.io/dcx022801/rvtu-bot:latest`，无需本地构建；只有改代码后才需要 `docker compose up -d --build`。
 
-> 镜像：`ghcr.io/dcx022801/rvtu-bot:latest`。如果拉取提示未授权，请在 GitHub 包设置中确认 `rvtu-bot` 可见性为 Public。
+### 方式二：直接拉取运行（不 clone）
+
+```sh
+docker pull ghcr.io/dcx022801/rvtu-bot:latest
+docker run -d --name rvtu-bot --network host --restart unless-stopped --init \
+  -v rvtu-state:/state \
+  ghcr.io/dcx022801/rvtu-bot:latest
+docker logs rvtu-bot | grep -A5 'Web 管理员'
+```
+
+直接 run 的持久化数据在命名卷 `rvtu-state`（管理员、用户、登录态、日志）；compose 方式在仓库的 `state/`。
+
+首次启动会在日志中打印一次性管理员账号，然后访问 `http://<服务器IP>:11451` 登录，添加用户并启用。
 
 ## Windows GUI
 
